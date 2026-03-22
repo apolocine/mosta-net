@@ -1,0 +1,60 @@
+{
+  "name": "@mostajs/net",
+  "version": "1.0.0-alpha.1",
+  "description": "Multi-protocol transport layer for @mostajs/orm — expose entities via REST, gRPC, GraphQL, WebSocket, SSE, tRPC, MCP, OData, Arrow Flight, JSON-RPC, NATS",
+  "author": "Dr Hamid MADANI <drmdh@msn.com>",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "mostajs-net": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js serve"
+  },
+  "peerDependencies": {
+    "@mostajs/orm": ">=1.4.17"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/ws": "^8.18.1",
+    "fastify": "^5.3.3",
+    "graphql": "^16.13.1",
+    "mercurius": "^16.8.0",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "orm",
+    "transport",
+    "rest",
+    "grpc",
+    "graphql",
+    "websocket",
+    "sse",
+    "mcp",
+    "multi-protocol",
+    "mostajs"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/apolocine/mosta-net"
+  }
+}
