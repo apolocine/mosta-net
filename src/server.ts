@@ -46,8 +46,44 @@ export async function startServer(): Promise<NetServer> {
   // 4. Get schemas
   const schemas = getAllSchemas();
 
-  // 5. Create shared Fastify instance
+  // 5. Display startup banner
+  const C = { reset: '\x1b[0m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m', yellow: '\x1b[33m', magenta: '\x1b[35m', gray: '\x1b[90m', blue: '\x1b[34m' };
+  const maskedUri = (process.env.SGBD_URI || '').replace(/:([^@]+)@/, ':***@');
+  console.log(`
+${C.cyan}┌─────────────────────────────────────────────────────┐${C.reset}
+${C.cyan}│${C.reset}  ${C.cyan}@mostajs/net${C.reset}                                        ${C.cyan}│${C.reset}
+${C.cyan}│${C.reset}  Dialect:    ${C.green}${process.env.DB_DIALECT || 'unknown'}${C.reset} ${C.dim}(${maskedUri})${C.reset}
+${C.cyan}│${C.reset}  Entities:   ${C.green}${schemas.map(s => s.name).join(', ')}${C.reset} ${C.dim}(${schemas.length})${C.reset}
+${C.cyan}│${C.reset}  Port:       ${C.yellow}${config.port}${C.reset}
+${C.cyan}│${C.reset}  Show SQL:   ${process.env.DB_SHOW_SQL === 'true' ? C.green + 'true' : C.gray + 'false'}${C.reset}  Format: ${process.env.DB_FORMAT_SQL === 'true' ? C.green + 'true' : C.gray + 'false'}${C.reset}  Highlight: ${process.env.DB_HIGHLIGHT_SQL === 'true' ? C.green + 'true' : C.gray + 'false'}${C.reset}
+${C.cyan}│${C.reset}  Pool:       ${C.yellow}${process.env.DB_POOL_SIZE || '10'}${C.reset}  Strategy: ${C.yellow}${process.env.DB_SCHEMA_STRATEGY || 'none'}${C.reset}
+${C.cyan}│${C.reset}  Transports: ${C.green}${getEnabledTransports(config).join(', ')}${C.reset} ${C.dim}(${getEnabledTransports(config).length})${C.reset}
+${C.cyan}└─────────────────────────────────────────────────────┘${C.reset}
+`);
+
+  // 5b. Create shared Fastify instance
   const app = Fastify({ logger: false });
+
+  // 5c. Request logger — log each transaction to terminal
+  app.addHook('onResponse', (req, reply, done) => {
+    const ms = reply.elapsedTime?.toFixed(0) || '?';
+    const status = reply.statusCode;
+    const method = req.method;
+    const url = req.url;
+
+    // Detect transport from URL
+    let transport = 'HTTP';
+    if (url.startsWith('/api/v1/')) transport = 'REST';
+    else if (url.startsWith('/graphql')) transport = 'GraphQL';
+    else if (url.startsWith('/rpc')) transport = 'JSON-RPC';
+    else if (url.startsWith('/ws')) transport = 'WS';
+    else if (url.startsWith('/events')) transport = 'SSE';
+    else if (url.startsWith('/mcp')) transport = 'MCP';
+
+    const statusColor = status < 300 ? C.green : status < 400 ? C.yellow : C.magenta;
+    console.log(`${C.dim}[NET:${C.cyan}${transport}${C.dim}]${C.reset} ${C.blue}${method}${C.reset} ${url} ${statusColor}${status}${C.reset} ${C.gray}(${ms}ms)${C.reset}`);
+    done();
+  });
 
   // 6. ORM handler (OrmRequest → EntityService → OrmResponse)
   const ormHandler = async (req: OrmRequest, _ctx: TransportContext): Promise<OrmResponse> => {
