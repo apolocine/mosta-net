@@ -243,3 +243,20 @@ npm install @modelcontextprotocol/sdk --legacy-peer-deps 2>&1 | tail -5)
  Command contains $() command substitution
 
 --------------
+
+
+
+
+
+
+
+  kill $(lsof -t -i:4489) 2>/dev/null; sleep 1 && echo "Serveur
+   redemarre..." && node dist/cli.js serve 2>&1 &
+   sleep 2
+   echo "Serveur pret sur http://localhost:4489/"
+   echo "Login: admin / admin123"
+   
+   
+   
+   
+   
