@@ -1,6 +1,6 @@
 {
   "name": "@mostajs/net",
-  "version": "1.0.2",
+  "version": "1.0.5",
   "description": "Multi-protocol transport layer for @mostajs/orm — expose entities via REST, gRPC, GraphQL, WebSocket, SSE, tRPC, MCP, OData, Arrow Flight, JSON-RPC, NATS",
   "author": "Dr Hamid MADANI <drmdh@msn.com>",
   "license": "MIT",
@@ -32,6 +32,7 @@
     "fastify": "^5.3.3",
     "graphql": "^16.13.1",
     "mercurius": "^16.8.0",
+    "mongoose": "^9.3.3",
     "ws": "^8.20.0"
   },
   "devDependencies": {
