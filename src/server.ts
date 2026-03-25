@@ -371,10 +371,58 @@ ${C.cyan}└──────────────────────�
 
   app.post('/api/reconnect', async () => {
     try {
+      // Force new connection (disconnect singleton first)
+      const { disconnectDialect } = await import('@mostajs/orm');
+      try { await disconnectDialect(); } catch {}
       dialect = await getDialect();
       entityService = new EntityService(dialect);
+      // Re-init schemas if available
+      const currentSchemas = getAllSchemas();
+      if (currentSchemas.length > 0) {
+        await dialect.initSchema(currentSchemas);
+      }
       dbError = '';
-      return { ok: true, message: 'Reconnexion reussie' };
+      return { ok: true, message: 'Reconnexion reussie (' + currentSchemas.length + ' schemas)' };
+    } catch (e: unknown) {
+      dbError = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: dbError };
+    }
+  });
+
+  app.post('/api/reload-config', async () => {
+    try {
+      // 1. Reload .env.local
+      const fs = await import('fs');
+      const path = await import('path');
+      const envPath = path.resolve(process.cwd(), '.env.local');
+      if (fs.existsSync(envPath)) {
+        const content = fs.readFileSync(envPath, 'utf-8');
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          const eq = trimmed.indexOf('=');
+          if (eq > 0) process.env[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+        }
+      }
+
+      // 2. Disconnect current DB
+      const { disconnectDialect } = await import('@mostajs/orm');
+      try { await disconnectDialect(); } catch {}
+
+      // 3. Reconnect with new config
+      dialect = await getDialect();
+      entityService = new EntityService(dialect);
+
+      // 4. Re-init schemas
+      const currentSchemas = getAllSchemas();
+      if (currentSchemas.length > 0) {
+        await dialect.initSchema(currentSchemas);
+      }
+
+      dbError = '';
+      const newDialect = process.env.DB_DIALECT || 'unknown';
+      const newUri = (process.env.SGBD_URI || '').replace(/:([^@]+)@/, ':***@');
+      return { ok: true, message: 'Config rechargee — ' + newDialect + ' (' + newUri + '), ' + currentSchemas.length + ' schemas' };
     } catch (e: unknown) {
       dbError = e instanceof Error ? e.message : String(e);
       return { ok: false, error: dbError };
@@ -591,6 +639,7 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
       <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Show SQL</td><td>${process.env.DB_SHOW_SQL === 'true' ? '✅' : '❌'} Format: ${process.env.DB_FORMAT_SQL === 'true' ? '✅' : '❌'} Highlight: ${process.env.DB_HIGHLIGHT_SQL === 'true' ? '✅' : '❌'}</td></tr>
     </table>
     <div style="display:flex;gap:.5rem;margin-top:.75rem;flex-wrap:wrap;align-items:center">
+      <button class="btn" onclick="doReloadConfig()" style="background:#06b6d4">Recharger config</button>
       <button class="btn" onclick="doTestConn()" style="background:#3b82f6">Tester connexion</button>
       <button class="btn" onclick="doReconnect()" style="background:#8b5cf6">Reconnecter</button>
       <button class="btn" onclick="doCreateDb()" style="background:#22c55e">Créer la base</button>
@@ -1027,6 +1076,20 @@ loadSchemasConfig();
 // ============================================================
 // Database management
 // ============================================================
+async function doReloadConfig(){
+  const el=document.getElementById('dbStatus');
+  el.textContent='Rechargement config...';
+  try{
+    const r=await fetch(BASE+'/api/reload-config',{method:'POST'});
+    const d=await r.json();
+    if(d.ok){
+      el.innerHTML='<span style="color:#22c55e">✅ '+d.message+'</span>';
+      setTimeout(()=>location.reload(),1500);
+    }else{
+      el.innerHTML='<span style="color:#ef4444">❌ '+(d.error||'Erreur')+'</span>';
+    }
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+}
 async function doReconnect(){
   const el=document.getElementById('dbStatus');
   el.textContent='Reconnexion...';
