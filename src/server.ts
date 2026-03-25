@@ -64,6 +64,10 @@ ${C.cyan}└──────────────────────�
   // 5b. Create shared Fastify instance
   const app = Fastify({ logger: false });
 
+  // CORS — allow cross-origin requests (ornetadmin API Explorer, Studio, etc.)
+  const cors = (await import('@fastify/cors')).default;
+  await app.register(cors, { origin: true });
+
   // 5c. Request logger — log each transaction to terminal
   app.addHook('onResponse', (req, reply, done) => {
     const ms = reply.elapsedTime?.toFixed(0) || '?';
