@@ -91,3 +91,28 @@ code 0)
   Ouvre http://localhost:4488/ dans le navigateur — tu verras le dashboard complet avec la section Schemas, l'API Explorer, la Console Live,
   et l'Import Config.
 
+
+
+
+● @mostajs/net@1.0.5 publié. Le serveur net :
+
+  ┌───────────────────┬───────────────────────────────────────────────────┐
+  │     Situation     │                   Comportement                    │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ DB disponible     │ Connecte, affiche ✅ Connecté                     │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ DB indisponible   │ Affiche ⚠️  message explicatif, démarre quand même │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ DB inexistante    │ Bouton "Créer la base"                            │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ Schemas manquants │ Bouton "Scanner" ou "Uploader ZIP"                │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ Après correction  │ Bouton "Reconnecter" → tente la connexion         │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ Appliquer schéma  │ Bouton "Appliquer schéma" → crée les tables       │
+  └───────────────────┴───────────────────────────────────────────────────┘
+
+
+
+
+
