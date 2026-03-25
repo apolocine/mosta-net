@@ -4,8 +4,9 @@
 
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import { EntityService, getAllSchemas, getDialect } from '@mostajs/orm';
+import { EntityService, getAllSchemas, getDialect, registerSchemas } from '@mostajs/orm';
 import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
+import { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip } from './lib/schema-loader.js';
 import { loadNetConfig, getEnabledTransports } from './core/config.js';
 import { getTransport, stopAllTransports } from './core/factory.js';
 import { loggingMiddleware } from './core/middleware.js';
@@ -37,14 +38,47 @@ export async function startServer(): Promise<NetServer> {
   // 1. Load net config
   const config = loadNetConfig();
 
-  // 2. Connect ORM
-  const dialect = await getDialect();
+  // 2. Connect ORM (non-blocking — server starts even if DB is unavailable)
+  let dialect: import('@mostajs/orm').IDialect | null = null;
+  let entityService: EntityService | null = null;
+  let dbError = '';
 
-  // 3. Create EntityService
-  const entityService = new EntityService(dialect);
+  try {
+    dialect = await getDialect();
+    entityService = new EntityService(dialect);
+  } catch (e: unknown) {
+    dbError = e instanceof Error ? e.message : String(e);
+    // Simplify common errors
+    if (dbError.includes('ECONNREFUSED')) dbError = 'Connexion refusee — le serveur DB est-il demarre ?';
+    else if (dbError.includes('authentication failed') || dbError.includes('AuthenticationFailed')) dbError = 'Authentification echouee — verifiez user/password dans SGBD_URI';
+    else if (dbError.includes('does not exist')) dbError = 'Base de donnees inexistante — utilisez "Creer la base" depuis l\'IHM';
+    else if (dbError.includes('not found')) dbError = 'Driver DB non installe — npm install <driver>';
+    console.log(`\n  \x1b[33m⚠ DB non connectee:\x1b[0m ${dbError}`);
+    console.log(`  Le serveur demarre quand meme — configurez la DB depuis l'IHM\n`);
+  }
 
-  // 4. Get schemas
-  const schemas = getAllSchemas();
+  // 4. Get schemas: schemas.json → SCHEMAS_PATH → getAllSchemas() (embedded mode)
+  let schemas = getAllSchemas();
+  if (schemas.length === 0) {
+    // Try schemas.json
+    const fromJson = loadSchemasFromJson('schemas.json');
+    if (fromJson.length > 0) {
+      registerSchemas(fromJson);
+      schemas = fromJson;
+      console.log(`  Loaded ${schemas.length} schemas from schemas.json`);
+    }
+  }
+  if (schemas.length === 0 && process.env.SCHEMAS_PATH) {
+    // Try scanning directories from SCHEMAS_PATH
+    const fromDirs = scanSchemaDirs(process.env.SCHEMAS_PATH);
+    if (fromDirs.length > 0) {
+      registerSchemas(fromDirs);
+      schemas = fromDirs;
+      // Auto-generate schemas.json for next time
+      generateSchemasJson(fromDirs);
+      console.log(`  Scanned ${schemas.length} schemas from ${process.env.SCHEMAS_PATH} → saved schemas.json`);
+    }
+  }
 
   // 5. Display startup banner
   const C = { reset: '\x1b[0m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m', yellow: '\x1b[33m', magenta: '\x1b[35m', gray: '\x1b[90m', blue: '\x1b[34m' };
@@ -91,6 +125,9 @@ ${C.cyan}└──────────────────────�
 
   // 6. ORM handler (OrmRequest → EntityService → OrmResponse)
   const ormHandler = async (req: OrmRequest, _ctx: TransportContext): Promise<OrmResponse> => {
+    if (!entityService) {
+      return { status: 'error', data: null, error: { code: 'DB_NOT_CONNECTED', message: 'Base de donnees non connectee: ' + (dbError || 'configurez DB_DIALECT + SGBD_URI') } };
+    }
     return entityService.execute(req);
   };
 
@@ -139,10 +176,12 @@ ${C.cyan}└──────────────────────�
       });
 
       // Wire EntityService change events → SSE broadcast
-      entityService.on('entity.created', (data) => sseTransport.broadcast('entity.created', data));
-      entityService.on('entity.updated', (data) => sseTransport.broadcast('entity.updated', data));
-      entityService.on('entity.deleted', (data) => sseTransport.broadcast('entity.deleted', data));
-      entityService.on('entity.upserted', (data) => sseTransport.broadcast('entity.upserted', data));
+      if (entityService) {
+        entityService.on('entity.created', (data) => sseTransport.broadcast('entity.created', data));
+        entityService.on('entity.updated', (data) => sseTransport.broadcast('entity.updated', data));
+        entityService.on('entity.deleted', (data) => sseTransport.broadcast('entity.deleted', data));
+        entityService.on('entity.upserted', (data) => sseTransport.broadcast('entity.upserted', data));
+      }
     }
 
     // Mount GraphQL via mercurius
@@ -198,10 +237,184 @@ ${C.cyan}└──────────────────────�
   // 8. Health check
   app.get('/health', async () => ({ status: 'ok', transports: enabledNames, entities: schemas.map(s => s.name) }));
 
-  // 8b. Home page — net dashboard
+  // 8b. Live log SSE — stream request logs to browser
+  const liveLogClients: import('http').ServerResponse[] = [];
+
+  app.get('/api/live-log', async (req, reply) => {
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    });
+    raw.write('data: {"type":"connected"}\n\n');
+    liveLogClients.push(raw);
+    raw.on('close', () => {
+      const i = liveLogClients.indexOf(raw);
+      if (i >= 0) liveLogClients.splice(i, 1);
+    });
+  });
+
+  // Enhance request logger to also push to live-log SSE clients
+  app.addHook('onResponse', (req, reply, done) => {
+    if (liveLogClients.length > 0 && !req.url.startsWith('/api/live-log')) {
+      const ms = reply.elapsedTime?.toFixed(0) || '?';
+      let transport = 'HTTP';
+      if (req.url.startsWith('/api/v1/')) transport = 'REST';
+      else if (req.url.startsWith('/graphql')) transport = 'GraphQL';
+      else if (req.url.startsWith('/rpc')) transport = 'JSON-RPC';
+      else if (req.url.startsWith('/ws')) transport = 'WS';
+      else if (req.url.startsWith('/events')) transport = 'SSE';
+      else if (req.url.startsWith('/mcp')) transport = 'MCP';
+
+      const entry = JSON.stringify({
+        type: 'request',
+        time: new Date().toISOString(),
+        transport,
+        method: req.method,
+        url: req.url,
+        status: reply.statusCode,
+        ms,
+      });
+      for (const client of liveLogClients) {
+        try { client.write(`data: ${entry}\n\n`); } catch {}
+      }
+    }
+    done();
+  });
+
+  // 8c. Import ZIP config (uploaded from ornetadmin or browser)
+  app.post('/api/import-config', async (req, reply) => {
+    try {
+      const body = req.body as { env?: Record<string, string>; apikeys?: unknown };
+      if (!body || !body.env) {
+        return reply.status(400).send({ error: 'Invalid config: expected { env: {...}, apikeys: {...} }' });
+      }
+      // Write .env.local
+      const fs = await import('fs');
+      const path = await import('path');
+      const envPath = path.resolve(process.cwd(), '.env.local');
+      let envContent = '# Imported by @mostajs/net\n# Date: ' + new Date().toISOString() + '\n\n';
+      for (const [k, v] of Object.entries(body.env)) {
+        envContent += `${k}=${v}\n`;
+      }
+      fs.writeFileSync(envPath, envContent, 'utf-8');
+
+      // Write .mosta/apikeys.json
+      if (body.apikeys) {
+        const mostaDir = path.resolve(process.cwd(), '.mosta');
+        if (!fs.existsSync(mostaDir)) fs.mkdirSync(mostaDir, { recursive: true });
+        fs.writeFileSync(path.join(mostaDir, 'apikeys.json'), JSON.stringify(body.apikeys, null, 2), 'utf-8');
+      }
+
+      return { ok: true, message: 'Config imported. Restart the server to apply.' };
+    } catch (e: unknown) {
+      return reply.status(500).send({ error: e instanceof Error ? e.message : 'Import failed' });
+    }
+  });
+
+  // 8d. Schemas management API
+  app.get('/api/schemas-config', async () => getSchemasConfig());
+
+  app.post('/api/scan-schemas', async (req) => {
+    const body = req.body as { path?: string };
+    const scanPath = body?.path || process.env.SCHEMAS_PATH || '';
+    if (!scanPath) return { error: 'No path provided. Set SCHEMAS_PATH in .env.local or provide path in body.' };
+    const found = scanSchemaDirs(scanPath);
+    return { ok: true, count: found.length, schemas: found.map(s => ({ name: s.name, collection: s.collection, fieldsCount: Object.keys(s.fields).length })) };
+  });
+
+  app.post('/api/generate-schemas', async (req) => {
+    const body = req.body as { path?: string };
+    const scanPath = body?.path || process.env.SCHEMAS_PATH || '';
+    if (!scanPath) return { error: 'No path provided.' };
+    const found = scanSchemaDirs(scanPath);
+    if (found.length === 0) return { error: 'No schemas found in ' + scanPath };
+    const outPath = generateSchemasJson(found);
+    // Register in ORM
+    registerSchemas(found);
+    return { ok: true, count: found.length, path: outPath };
+  });
+
+  app.post('/api/upload-schemas', async (req) => {
+    const body = req.body as { zip?: string; schemas?: EntitySchema[] };
+    // Option 1: ZIP as base64
+    if (body?.zip) {
+      const buf = Buffer.from(body.zip, 'base64');
+      const found = parseSchemasFromZip(buf);
+      if (found.length === 0) return { error: 'No .schema.ts files found in ZIP' };
+      generateSchemasJson(found);
+      registerSchemas(found);
+      return { ok: true, count: found.length, schemas: found.map(s => ({ name: s.name, collection: s.collection })) };
+    }
+    // Option 2: Direct schemas array
+    if (body?.schemas?.length) {
+      generateSchemasJson(body.schemas);
+      registerSchemas(body.schemas);
+      return { ok: true, count: body.schemas.length };
+    }
+    return { error: 'Provide zip (base64) or schemas array' };
+  });
+
+  // 8e. Database management API
+  app.post('/api/test-connection', async () => {
+    if (!dialect) return { ok: false, message: 'DB non connectee: ' + dbError };
+    try {
+      const ok = await dialect.testConnection();
+      return { ok, message: ok ? 'Connexion reussie' : 'Echec de connexion' };
+    } catch (e: unknown) {
+      return { ok: false, message: e instanceof Error ? e.message : 'Erreur' };
+    }
+  });
+
+  app.post('/api/reconnect', async () => {
+    try {
+      dialect = await getDialect();
+      entityService = new EntityService(dialect);
+      dbError = '';
+      return { ok: true, message: 'Reconnexion reussie' };
+    } catch (e: unknown) {
+      dbError = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: dbError };
+    }
+  });
+
+  app.post('/api/create-database', async (req) => {
+    const body = req.body as { name?: string } | null;
+    const dbDialect = process.env.DB_DIALECT || '';
+    const uri = process.env.SGBD_URI || '';
+    try {
+      const { createDatabase } = await import('@mostajs/orm');
+      const dbName = body?.name || uri.split('/').pop()?.split('?')[0] || '';
+      if (!dbName) return { ok: false, error: 'Nom de base non detecte dans SGBD_URI' };
+      await createDatabase(dbDialect as any, uri, dbName);
+      return { ok: true, message: 'Base "' + dbName + '" creee' };
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur';
+      // "already exists" is OK
+      if (msg.includes('already exists') || msg.includes('existe')) return { ok: true, message: 'Base existe deja' };
+      return { ok: false, error: msg };
+    }
+  });
+
+  app.post('/api/apply-schema', async () => {
+    if (!dialect) return { ok: false, error: 'DB non connectee. Utilisez "Reconnecter" d abord.' };
+    try {
+      const currentSchemas = getAllSchemas();
+      if (currentSchemas.length === 0) return { ok: false, error: 'Aucun schema charge. Scannez ou uploadez les schemas d abord.' };
+      await dialect.initSchema(currentSchemas);
+      return { ok: true, message: currentSchemas.length + ' schemas appliques (tables creees/mises a jour)', tables: currentSchemas.map(s => s.collection) };
+    } catch (e: unknown) {
+      return { ok: false, error: e instanceof Error ? e.message : 'Erreur' };
+    }
+  });
+
+  // 8f. Home page — net dashboard
   app.get('/', async (req, reply) => {
     reply.type('text/html');
-    return getNetDashboardHtml(config.port, enabledNames, schemas, maskedUri);
+    return getNetDashboardHtml(config.port, enabledNames, schemas, maskedUri, dbError);
   });
 
   // 9. Listen
@@ -216,9 +429,11 @@ ${C.cyan}└──────────────────────�
       wsTransport.attachToServer(app.server);
 
       // Wire change events → WS broadcast
-      entityService.on('entity.created', (data) => wsTransport.broadcast('entity.created', data));
-      entityService.on('entity.updated', (data) => wsTransport.broadcast('entity.updated', data));
-      entityService.on('entity.deleted', (data) => wsTransport.broadcast('entity.deleted', data));
+      if (entityService) {
+        entityService.on('entity.created', (data) => wsTransport.broadcast('entity.created', data));
+        entityService.on('entity.updated', (data) => wsTransport.broadcast('entity.updated', data));
+        entityService.on('entity.deleted', (data) => wsTransport.broadcast('entity.deleted', data));
+      }
     }
   }
 
@@ -226,7 +441,7 @@ ${C.cyan}└──────────────────────�
 
   return {
     app,
-    entityService,
+    entityService: entityService!,
     stop: async () => {
       await stopAllTransports();
       await app.close();
@@ -321,7 +536,7 @@ function registerRestRoutes(
 // Net Dashboard HTML
 // ============================================================
 
-function getNetDashboardHtml(port: number, transports: string[], schemas: EntitySchema[], dbUri: string): string {
+function getNetDashboardHtml(port: number, transports: string[], schemas: EntitySchema[], dbUri: string, dbErr = ''): string {
   const dialect = process.env.DB_DIALECT || 'unknown';
   const entityList = schemas.map(s => s.name);
   const restEntities = schemas.map(s => `<li><a href="/api/v1/${s.collection}" target="_blank">/api/v1/${s.collection}</a> <span style="color:#94a3b8">(${s.name})</span></li>`).join('');
@@ -375,6 +590,13 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
       <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Strategy</td><td>${process.env.DB_SCHEMA_STRATEGY || 'none'}</td></tr>
       <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Show SQL</td><td>${process.env.DB_SHOW_SQL === 'true' ? '✅' : '❌'} Format: ${process.env.DB_FORMAT_SQL === 'true' ? '✅' : '❌'} Highlight: ${process.env.DB_HIGHLIGHT_SQL === 'true' ? '✅' : '❌'}</td></tr>
     </table>
+    <div style="display:flex;gap:.5rem;margin-top:.75rem;flex-wrap:wrap;align-items:center">
+      <button class="btn" onclick="doTestConn()" style="background:#3b82f6">Tester connexion</button>
+      <button class="btn" onclick="doReconnect()" style="background:#8b5cf6">Reconnecter</button>
+      <button class="btn" onclick="doCreateDb()" style="background:#22c55e">Créer la base</button>
+      <button class="btn" onclick="doApplySchema()" style="background:#f59e0b;color:#000">Appliquer schéma</button>
+      <span id="dbStatus" style="font-size:.85rem;color:#94a3b8">${dbErr ? '❌ ' + dbErr : '✅ Connecté'}</span>
+    </div>
   </div>
 
   <h2>Transports</h2>
@@ -451,6 +673,97 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
       <pre id="exOutput"></pre>
     </div>
   </div>
+
+  <h2>Schemas <span style="font-size:.75rem;color:#64748b;font-weight:normal">— charger les EntitySchema</span></h2>
+  <div class="card">
+    <div id="schemasStatus" style="margin-bottom:.5rem;font-size:.85rem;color:#94a3b8">Chargement...</div>
+    <div style="display:grid;grid-template-columns:1fr auto;gap:.5rem;margin-bottom:.5rem;align-items:end">
+      <div>
+        <label style="font-size:.75rem;color:#94a3b8">Chemin des schemas (SCHEMAS_PATH)</label>
+        <input id="schemasPath" placeholder="./src/dal/schemas" value="${process.env.SCHEMAS_PATH || ''}"/>
+      </div>
+      <button class="btn" onclick="doScanSchemas()" style="height:36px">Scanner</button>
+    </div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+      <button class="btn" onclick="doGenerateSchemas()" style="background:#22c55e">Générer schemas.json</button>
+      <button class="btn" onclick="document.getElementById('schemasZipInput').click()" style="background:#3b82f6">Uploader ZIP</button>
+      <input type="file" id="schemasZipInput" accept=".zip" style="display:none" onchange="doUploadSchemasZip(this)"/>
+      <span id="schemasMsg" style="font-size:.85rem;color:#94a3b8;align-self:center"></span>
+    </div>
+    <div id="schemasTable" style="margin-top:.5rem"></div>
+  </div>
+
+  <h2>Import Config <span style="font-size:.75rem;color:#64748b;font-weight:normal">— importer le ZIP exporté par ornetadmin</span></h2>
+  <div class="card">
+    <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+      <button class="btn" onclick="document.getElementById('zipInput').click()" style="background:#22c55e">Importer ZIP</button>
+      <button class="btn" onclick="document.getElementById('jsonInput').click()">Importer JSON</button>
+      <input type="file" id="zipInput" accept=".zip" style="display:none" onchange="doImportZip(this)"/>
+      <input type="file" id="jsonInput" accept=".json" style="display:none" onchange="doImportJson(this)"/>
+      <span id="importStatus" style="font-size:.85rem;color:#94a3b8"></span>
+    </div>
+    <p style="font-size:.8rem;color:#64748b;margin-top:.5rem">
+      Accepte le ZIP (.env.local + .mosta/apikeys.json) ou le JSON exporté par ornetadmin.
+      Après import, redémarrez le serveur pour appliquer les changements.
+    </p>
+  </div>
+
+  <h2>Console Live <span style="font-size:.75rem;color:#64748b;font-weight:normal">— requêtes en temps réel</span></h2>
+  <div class="card">
+    <div style="display:flex;gap:.5rem;margin-bottom:.5rem;align-items:center">
+      <button class="btn" onclick="startLiveLog()" id="btnLive" style="background:#22c55e">Connecter</button>
+      <button class="btn" onclick="clearLiveLog()" style="background:#334155">Clear</button>
+      <select id="liveFilter" onchange="filterLiveLog()" style="width:auto">
+        <option value="">Tous</option>
+        <option value="REST">REST</option>
+        <option value="GraphQL">GraphQL</option>
+        <option value="JSON-RPC">JSON-RPC</option>
+        <option value="WS">WS</option>
+        <option value="SSE">SSE</option>
+        <option value="MCP">MCP</option>
+        <option value="HTTP">HTTP</option>
+      </select>
+      <span id="liveStatus" style="font-size:.8rem;color:#64748b">Déconnecté</span>
+      <span id="liveCount" style="font-size:.8rem;color:#94a3b8;margin-left:auto">0 requêtes</span>
+    </div>
+    <div id="liveLog" style="background:#0f172a;border-radius:6px;padding:.5rem;max-height:400px;overflow-y:auto;font-family:monospace;font-size:.8rem;line-height:1.6">
+      <div style="color:#64748b">En attente de connexion...</div>
+    </div>
+  </div>
+
+  <h2>Test Connectivité <span style="font-size:.75rem;color:#64748b;font-weight:normal">— tester depuis ornetadmin ou tout client</span></h2>
+  <div class="card">
+    <p style="font-size:.85rem;color:#94a3b8;margin-bottom:.5rem">Testez la connectivité et les transports depuis n'importe quel client :</p>
+    <pre style="background:#0f172a;padding:1rem;border-radius:6px;font-size:.8rem;line-height:1.8;color:#e2e8f0;overflow-x:auto">
+<span style="color:#64748b"># Health check</span>
+<span style="color:#22c55e">curl</span> http://localhost:${port}/health
+
+<span style="color:#64748b"># REST — lister les entités</span>
+<span style="color:#22c55e">curl</span> http://localhost:${port}/api/v1/${schemas[0]?.collection || 'users'}
+
+<span style="color:#64748b"># REST — créer</span>
+<span style="color:#22c55e">curl</span> -X POST http://localhost:${port}/api/v1/${schemas[0]?.collection || 'users'} \\
+  -H "Content-Type: application/json" -d '{"name":"Test"}'
+
+<span style="color:#64748b"># JSON-RPC</span>
+<span style="color:#22c55e">curl</span> -X POST http://localhost:${port}/rpc \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","method":"${schemas[0]?.name || 'User'}.findAll","params":{},"id":1}'
+
+<span style="color:#64748b"># WebSocket</span>
+<span style="color:#22c55e">wscat</span> -c ws://localhost:${port}/ws
+
+<span style="color:#64748b"># SSE (événements temps réel)</span>
+<span style="color:#22c55e">curl</span> -N http://localhost:${port}/events
+
+<span style="color:#64748b"># Depuis ornetadmin API Explorer</span>
+<span style="color:#64748b"># Ouvrir http://localhost:4489/ → API Explorer → Serveur: http://localhost:${port}</span>
+
+<span style="color:#64748b"># Client Java (à venir)</span>
+<span style="color:#64748b"># MostaClient client = new MostaClient("http://localhost:${port}");</span>
+<span style="color:#64748b"># List&lt;User&gt; users = client.rest().findAll(User.class);</span>
+    </pre>
+  </div>
 </div>
 
 <script>
@@ -515,6 +828,244 @@ async function doExplore(){
   }catch(e){
     statusEl.innerHTML='<span style="color:#ef4444">Erreur: '+e.message+'</span>';
   }
+}
+
+// ============================================================
+// Import Config (ZIP or JSON)
+// ============================================================
+function crc32(data){
+  let crc=0xFFFFFFFF;
+  for(let i=0;i<data.length;i++){crc^=data[i];for(let j=0;j<8;j++)crc=(crc>>>1)^(crc&1?0xEDB88320:0)}
+  return (crc^0xFFFFFFFF)>>>0;
+}
+function parseZip(buf){
+  const view=new DataView(buf);
+  const files=[];let offset=0;
+  while(offset<buf.byteLength-4){
+    const sig=view.getUint32(offset,true);
+    if(sig!==0x04034b50)break;
+    const nameLen=view.getUint16(offset+26,true);
+    const extraLen=view.getUint16(offset+28,true);
+    const compSize=view.getUint32(offset+18,true);
+    const name=new TextDecoder().decode(new Uint8Array(buf,offset+30,nameLen));
+    const data=new Uint8Array(buf,offset+30+nameLen+extraLen,compSize);
+    files.push({name,content:new TextDecoder().decode(data)});
+    offset+=30+nameLen+extraLen+compSize;
+  }
+  return files;
+}
+async function doImportZip(input){
+  const file=input.files[0];if(!file)return;
+  const statusEl=document.getElementById('importStatus');
+  try{
+    const buf=await file.arrayBuffer();
+    const files=parseZip(buf);
+    const envFile=files.find(f=>f.name==='.env.local'||f.name==='env.local');
+    const keyFile=files.find(f=>f.name.includes('apikeys.json'));
+    if(!envFile){statusEl.innerHTML='<span style="color:#ef4444">ZIP invalide: .env.local manquant</span>';return}
+    // Parse .env.local into key-value
+    const env={};
+    for(const line of envFile.content.split('\\n')){
+      const trimmed=line.trim();
+      if(!trimmed||trimmed.startsWith('#'))continue;
+      const eq=trimmed.indexOf('=');
+      if(eq>0)env[trimmed.slice(0,eq)]=trimmed.slice(eq+1);
+    }
+    const body={env};
+    if(keyFile)try{body.apikeys=JSON.parse(keyFile.content)}catch{}
+    const r=await fetch(BASE+'/api/import-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(d.ok)statusEl.innerHTML='<span style="color:#22c55e">'+d.message+'</span>';
+    else statusEl.innerHTML='<span style="color:#ef4444">'+d.error+'</span>';
+  }catch(e){statusEl.innerHTML='<span style="color:#ef4444">'+e.message+'</span>'}
+  input.value='';
+}
+async function doImportJson(input){
+  const file=input.files[0];if(!file)return;
+  const statusEl=document.getElementById('importStatus');
+  try{
+    const text=await file.text();
+    const data=JSON.parse(text);
+    const r=await fetch(BASE+'/api/import-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const d=await r.json();
+    if(d.ok)statusEl.innerHTML='<span style="color:#22c55e">'+d.message+'</span>';
+    else statusEl.innerHTML='<span style="color:#ef4444">'+d.error+'</span>';
+  }catch(e){statusEl.innerHTML='<span style="color:#ef4444">'+e.message+'</span>'}
+  input.value='';
+}
+
+// ============================================================
+// Live Console (SSE)
+// ============================================================
+let liveSource=null;
+let liveEntries=[];
+let liveFilter='';
+let liveCount=0;
+
+function startLiveLog(){
+  if(liveSource){liveSource.close();liveSource=null}
+  const btn=document.getElementById('btnLive');
+  const statusEl=document.getElementById('liveStatus');
+  liveSource=new EventSource(BASE+'/api/live-log');
+  liveSource.onopen=()=>{
+    statusEl.innerHTML='<span style="color:#22c55e">Connecté</span>';
+    btn.textContent='Déconnecter';btn.style.background='#ef4444';
+    btn.onclick=stopLiveLog;
+  };
+  liveSource.onmessage=(e)=>{
+    const d=JSON.parse(e.data);
+    if(d.type==='connected')return;
+    if(d.type==='request'){
+      liveCount++;
+      document.getElementById('liveCount').textContent=liveCount+' requêtes';
+      const colors={REST:'#22c55e',GraphQL:'#a855f7','JSON-RPC':'#f59e0b',WS:'#3b82f6',SSE:'#06b6d4',MCP:'#ec4899',HTTP:'#94a3b8'};
+      const sc=d.status<300?'#22c55e':d.status<400?'#fbbf24':'#ef4444';
+      const time=d.time.split('T')[1]?.slice(0,8)||'';
+      const entry='<div class="live-entry" data-transport="'+d.transport+'">'+
+        '<span style="color:#64748b">'+time+'</span> '+
+        '<span style="color:'+(colors[d.transport]||'#94a3b8')+'">['+ d.transport+']</span> '+
+        '<span style="color:#38bdf8">'+d.method+'</span> '+
+        d.url+' '+
+        '<span style="color:'+sc+'">'+d.status+'</span> '+
+        '<span style="color:#64748b">('+d.ms+'ms)</span>'+
+        '</div>';
+      liveEntries.push(entry);
+      renderLiveLog();
+    }
+  };
+  liveSource.onerror=()=>{
+    statusEl.innerHTML='<span style="color:#ef4444">Déconnecté</span>';
+    btn.textContent='Reconnecter';btn.style.background='#22c55e';btn.onclick=startLiveLog;
+  };
+}
+function stopLiveLog(){
+  if(liveSource){liveSource.close();liveSource=null}
+  const btn=document.getElementById('btnLive');
+  btn.textContent='Connecter';btn.style.background='#22c55e';btn.onclick=startLiveLog;
+  document.getElementById('liveStatus').innerHTML='<span style="color:#64748b">Déconnecté</span>';
+}
+function clearLiveLog(){liveEntries=[];liveCount=0;document.getElementById('liveCount').textContent='0 requêtes';renderLiveLog()}
+function filterLiveLog(){liveFilter=document.getElementById('liveFilter').value;renderLiveLog()}
+function renderLiveLog(){
+  const el=document.getElementById('liveLog');
+  const filtered=liveFilter?liveEntries.filter(e=>e.includes('data-transport="'+liveFilter+'"')):liveEntries;
+  if(filtered.length===0){el.innerHTML='<div style="color:#64748b">Aucune requête'+(liveFilter?' (filtre: '+liveFilter+')':'')+'</div>';return}
+  el.innerHTML=filtered.slice(-200).join('');
+  el.scrollTop=el.scrollHeight;
+}
+
+// ============================================================
+// Schemas management
+// ============================================================
+async function loadSchemasConfig(){
+  try{
+    const r=await fetch(BASE+'/api/schemas-config');
+    const d=await r.json();
+    const el=document.getElementById('schemasStatus');
+    if(d.schemasJsonExists){
+      el.innerHTML='<span style="color:#22c55e">schemas.json trouvé</span> — '+d.schemaCount+' schemas';
+    }else{
+      el.innerHTML='<span style="color:#fbbf24">schemas.json non trouvé</span> — configurez le chemin ou uploadez un ZIP';
+    }
+    if(d.schemasPath)document.getElementById('schemasPath').value=d.schemasPath;
+    renderSchemasTable(d.schemas||[]);
+  }catch{}
+}
+function renderSchemasTable(schemas){
+  const el=document.getElementById('schemasTable');
+  if(!schemas.length){el.innerHTML='';return}
+  el.innerHTML='<table style="width:100%;font-size:.85rem;margin-top:.5rem"><thead><tr><th>Nom</th><th>Collection</th><th>Champs</th><th>Relations</th></tr></thead><tbody>'+
+    schemas.map(s=>'<tr><td><b>'+s.name+'</b></td><td class="mono">'+s.collection+'</td><td>'+s.fieldsCount+'</td><td>'+(s.relationsCount||0)+'</td></tr>').join('')+
+    '</tbody></table>';
+}
+async function doScanSchemas(){
+  const p=document.getElementById('schemasPath').value.trim();
+  if(!p){document.getElementById('schemasMsg').innerHTML='<span style="color:#ef4444">Chemin requis</span>';return}
+  document.getElementById('schemasMsg').textContent='Scan en cours...';
+  const r=await fetch(BASE+'/api/scan-schemas',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});
+  const d=await r.json();
+  if(d.ok){
+    document.getElementById('schemasMsg').innerHTML='<span style="color:#22c55e">'+d.count+' schemas trouvés</span>';
+    renderSchemasTable(d.schemas||[]);
+  }else{
+    document.getElementById('schemasMsg').innerHTML='<span style="color:#ef4444">'+(d.error||'Erreur')+'</span>';
+  }
+}
+async function doGenerateSchemas(){
+  const p=document.getElementById('schemasPath').value.trim();
+  if(!p){document.getElementById('schemasMsg').innerHTML='<span style="color:#ef4444">Chemin requis</span>';return}
+  document.getElementById('schemasMsg').textContent='Génération...';
+  const r=await fetch(BASE+'/api/generate-schemas',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});
+  const d=await r.json();
+  if(d.ok){
+    document.getElementById('schemasMsg').innerHTML='<span style="color:#22c55e">schemas.json généré ('+d.count+' schemas)</span>';
+    loadSchemasConfig();
+  }else{
+    document.getElementById('schemasMsg').innerHTML='<span style="color:#ef4444">'+(d.error||'Erreur')+'</span>';
+  }
+}
+async function doUploadSchemasZip(input){
+  const file=input.files[0];if(!file)return;
+  document.getElementById('schemasMsg').textContent='Upload...';
+  try{
+    const buf=await file.arrayBuffer();
+    const base64=btoa(String.fromCharCode(...new Uint8Array(buf)));
+    const r=await fetch(BASE+'/api/upload-schemas',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zip:base64})});
+    const d=await r.json();
+    if(d.ok){
+      document.getElementById('schemasMsg').innerHTML='<span style="color:#22c55e">'+d.count+' schemas importés depuis ZIP</span>';
+      loadSchemasConfig();
+    }else{
+      document.getElementById('schemasMsg').innerHTML='<span style="color:#ef4444">'+(d.error||'Erreur')+'</span>';
+    }
+  }catch(e){document.getElementById('schemasMsg').innerHTML='<span style="color:#ef4444">'+e.message+'</span>'}
+  input.value='';
+}
+// Load schemas config on page load
+loadSchemasConfig();
+
+// ============================================================
+// Database management
+// ============================================================
+async function doReconnect(){
+  const el=document.getElementById('dbStatus');
+  el.textContent='Reconnexion...';
+  try{
+    const r=await fetch(BASE+'/api/reconnect',{method:'POST'});
+    const d=await r.json();
+    el.innerHTML=d.ok?'<span style="color:#22c55e">✅ '+d.message+'</span>':'<span style="color:#ef4444">❌ '+(d.error||'Erreur')+'</span>';
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+}
+async function doTestConn(){
+  const el=document.getElementById('dbStatus');
+  el.textContent='Test en cours...';
+  try{
+    const r=await fetch(BASE+'/api/test-connection',{method:'POST'});
+    const d=await r.json();
+    el.innerHTML=d.ok?'<span style="color:#22c55e">✅ '+d.message+'</span>':'<span style="color:#ef4444">❌ '+d.message+'</span>';
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+}
+async function doCreateDb(){
+  const el=document.getElementById('dbStatus');
+  el.textContent='Création...';
+  try{
+    const r=await fetch(BASE+'/api/create-database',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const d=await r.json();
+    el.innerHTML=d.ok?'<span style="color:#22c55e">✅ '+d.message+'</span>':'<span style="color:#ef4444">❌ '+(d.error||d.message)+'</span>';
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+}
+async function doApplySchema(){
+  const el=document.getElementById('dbStatus');
+  el.textContent='Application du schéma...';
+  try{
+    const r=await fetch(BASE+'/api/apply-schema',{method:'POST'});
+    const d=await r.json();
+    if(d.ok){
+      el.innerHTML='<span style="color:#22c55e">✅ '+d.message+'</span>';
+    }else{
+      el.innerHTML='<span style="color:#ef4444">❌ '+(d.error||'Erreur')+'</span>';
+    }
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
 }
 </script>
 </body>

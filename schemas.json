@@ -1,0 +1,1020 @@
+[
+  {
+    "name": "Activity",
+    "collection": "activities",
+    "fields": {
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "slug": {
+        "type": "string",
+        "required": true,
+        "unique": true,
+        "lowercase": true
+      },
+      "description": {
+        "type": "string"
+      },
+      "icon": {
+        "type": "string"
+      },
+      "color": {
+        "type": "string"
+      },
+      "capacity": {
+        "type": "number"
+      },
+      "currentOccupancy": {
+        "type": "number",
+        "default": 0
+      },
+      "schedule": {
+        "type": "array",
+        "arrayOf": {
+          "kind": "embedded",
+          "fields": {
+            "dayOfWeek": {
+              "type": "number",
+              "required": true
+            },
+            "openTime": {
+              "type": "string",
+              "required": true
+            },
+            "closeTime": {
+              "type": "string",
+              "required": true
+            },
+            "isOpen": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      },
+      "ticketValidityMode": {
+        "type": "string",
+        "enum": [
+          "day_reentry",
+          "single_use",
+          "time_slot",
+          "unlimited"
+        ],
+        "default": "single_use"
+      },
+      "ticketDuration": {
+        "type": "number",
+        "default": null
+      },
+      "price": {
+        "type": "number",
+        "required": true,
+        "default": 0
+      },
+      "currency": {
+        "type": "string",
+        "default": "DA"
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "active",
+          "inactive",
+          "maintenance"
+        ],
+        "default": "active"
+      },
+      "sortOrder": {
+        "type": "number",
+        "default": 0
+      }
+    },
+    "relations": {
+      "createdBy": {
+        "target": "User",
+        "type": "many-to-one",
+        "nullable": true
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "status": "asc"
+        }
+      }
+    ],
+    "timestamps": true
+  },
+  {
+    "name": "AuditLog",
+    "collection": "auditlogs",
+    "fields": {
+      "userName": {
+        "type": "string",
+        "required": true
+      },
+      "userRole": {
+        "type": "string",
+        "required": true
+      },
+      "action": {
+        "type": "string",
+        "required": true
+      },
+      "module": {
+        "type": "string",
+        "required": true,
+        "enum": [
+          "clients",
+          "tickets",
+          "scan",
+          "lockers",
+          "rfid",
+          "access",
+          "users",
+          "activities",
+          "plans",
+          "settings"
+        ]
+      },
+      "resource": {
+        "type": "string",
+        "default": ""
+      },
+      "resourceId": {
+        "type": "string",
+        "default": ""
+      },
+      "details": {
+        "type": "json"
+      },
+      "ipAddress": {
+        "type": "string",
+        "default": ""
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "success",
+          "failure"
+        ],
+        "default": "success"
+      },
+      "timestamp": {
+        "type": "date",
+        "default": "now"
+      }
+    },
+    "relations": {
+      "userId": {
+        "target": "User",
+        "type": "many-to-one",
+        "required": true
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "timestamp": "desc"
+        }
+      },
+      {
+        "fields": {
+          "module": "asc",
+          "timestamp": "desc"
+        }
+      },
+      {
+        "fields": {
+          "userId": "asc",
+          "timestamp": "desc"
+        }
+      }
+    ],
+    "timestamps": false
+  },
+  {
+    "name": "ClientAccess",
+    "collection": "client_accesses",
+    "fields": {
+      "accessType": {
+        "type": "string",
+        "enum": [
+          "unlimited",
+          "count",
+          "temporal",
+          "mixed"
+        ],
+        "required": true
+      },
+      "totalQuota": {
+        "type": "number",
+        "default": null
+      },
+      "remainingQuota": {
+        "type": "number",
+        "default": null
+      },
+      "startDate": {
+        "type": "date",
+        "required": true
+      },
+      "endDate": {
+        "type": "date",
+        "default": null
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "active",
+          "expired",
+          "blocked",
+          "depleted"
+        ],
+        "default": "active"
+      }
+    },
+    "relations": {
+      "client": {
+        "target": "Client",
+        "type": "many-to-one",
+        "required": true
+      },
+      "plan": {
+        "target": "SubscriptionPlan",
+        "type": "many-to-one",
+        "nullable": true
+      },
+      "activity": {
+        "target": "Activity",
+        "type": "many-to-one",
+        "required": true
+      },
+      "createdBy": {
+        "target": "User",
+        "type": "many-to-one",
+        "required": true
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "client": "asc",
+          "activity": "asc"
+        }
+      },
+      {
+        "fields": {
+          "client": "asc",
+          "status": "asc"
+        }
+      },
+      {
+        "fields": {
+          "status": "asc"
+        }
+      }
+    ],
+    "timestamps": true
+  },
+  {
+    "name": "Client",
+    "collection": "clients",
+    "fields": {
+      "clientNumber": {
+        "type": "string",
+        "unique": true
+      },
+      "clientType": {
+        "type": "string",
+        "enum": [
+          "abonne",
+          "visiteur"
+        ],
+        "required": true
+      },
+      "firstName": {
+        "type": "string",
+        "required": true,
+        "trim": true
+      },
+      "lastName": {
+        "type": "string",
+        "required": true,
+        "trim": true
+      },
+      "phone": {
+        "type": "string",
+        "trim": true
+      },
+      "email": {
+        "type": "string",
+        "lowercase": true,
+        "trim": true,
+        "sparse": true
+      },
+      "dateOfBirth": {
+        "type": "date"
+      },
+      "gender": {
+        "type": "string",
+        "enum": [
+          "male",
+          "female"
+        ]
+      },
+      "photo": {
+        "type": "text"
+      },
+      "faceDescriptor": {
+        "type": "array",
+        "arrayOf": "number"
+      },
+      "address": {
+        "type": "string"
+      },
+      "wilaya": {
+        "type": "string"
+      },
+      "qrCode": {
+        "type": "string",
+        "unique": true
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "active",
+          "inactive",
+          "suspended"
+        ],
+        "default": "active"
+      },
+      "notes": {
+        "type": "string"
+      }
+    },
+    "relations": {
+      "rfidTagId": {
+        "target": "RfidTag",
+        "type": "one-to-one",
+        "nullable": true,
+        "select": [
+          "tagId",
+          "status"
+        ]
+      },
+      "createdBy": {
+        "target": "User",
+        "type": "many-to-one",
+        "required": true
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "phone": "asc"
+        }
+      },
+      {
+        "fields": {
+          "status": "asc"
+        }
+      },
+      {
+        "fields": {
+          "clientType": "asc"
+        }
+      },
+      {
+        "fields": {
+          "firstName": "text",
+          "lastName": "text",
+          "phone": "text",
+          "clientNumber": "text"
+        }
+      }
+    ],
+    "timestamps": true
+  },
+  {
+    "name": "Counter",
+    "collection": "counters",
+    "fields": {
+      "seq": {
+        "type": "number",
+        "default": 0
+      }
+    },
+    "relations": {},
+    "indexes": [],
+    "timestamps": false
+  },
+  {
+    "name": "LockerEvent",
+    "collection": "locker_events",
+    "fields": {
+      "eventType": {
+        "type": "string",
+        "enum": [
+          "assigned",
+          "released",
+          "tag_lost",
+          "maintenance_start",
+          "maintenance_end"
+        ],
+        "required": true
+      },
+      "notes": {
+        "type": "string"
+      },
+      "timestamp": {
+        "type": "date",
+        "default": "now"
+      }
+    },
+    "relations": {
+      "locker": {
+        "target": "Locker",
+        "type": "many-to-one",
+        "required": true
+      },
+      "client": {
+        "target": "Client",
+        "type": "many-to-one",
+        "nullable": true
+      },
+      "rfidTag": {
+        "target": "RfidTag",
+        "type": "many-to-one",
+        "nullable": true
+      },
+      "performedBy": {
+        "target": "User",
+        "type": "many-to-one",
+        "required": true
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "locker": "asc"
+        }
+      },
+      {
+        "fields": {
+          "timestamp": "desc"
+        }
+      }
+    ],
+    "timestamps": false
+  },
+  {
+    "name": "Locker",
+    "collection": "lockers",
+    "fields": {
+      "number": {
+        "type": "number",
+        "required": true,
+        "unique": true
+      },
+      "zone": {
+        "type": "string",
+        "enum": [
+          "A",
+          "B",
+          "C"
+        ],
+        "required": true
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "available",
+          "occupied",
+          "maintenance",
+          "out_of_order"
+        ],
+        "default": "available"
+      },
+      "rfidLockId": {
+        "type": "string"
+      },
+      "lastAssignedAt": {
+        "type": "date",
+        "default": null
+      }
+    },
+    "relations": {
+      "currentClient": {
+        "target": "Client",
+        "type": "one-to-one",
+        "nullable": true,
+        "select": [
+          "clientNumber",
+          "firstName",
+          "lastName"
+        ]
+      },
+      "currentTag": {
+        "target": "RfidTag",
+        "type": "one-to-one",
+        "nullable": true,
+        "select": [
+          "tagId"
+        ]
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "zone": "asc"
+        }
+      },
+      {
+        "fields": {
+          "status": "asc"
+        }
+      }
+    ],
+    "timestamps": true
+  },
+  {
+    "name": "PermissionCategory",
+    "collection": "permission_categories",
+    "fields": {
+      "name": {
+        "type": "string",
+        "required": true,
+        "unique": true,
+        "lowercase": true,
+        "trim": true
+      },
+      "label": {
+        "type": "string",
+        "required": true,
+        "trim": true
+      },
+      "description": {
+        "type": "string"
+      },
+      "icon": {
+        "type": "string"
+      },
+      "order": {
+        "type": "number",
+        "default": 0
+      },
+      "system": {
+        "type": "boolean",
+        "default": false
+      }
+    },
+    "relations": {},
+    "indexes": [
+      {
+        "fields": {
+          "order": "asc",
+          "name": "asc"
+        }
+      }
+    ],
+    "timestamps": true
+  },
+  {
+    "name": "Permission",
+    "collection": "permissions",
+    "fields": {
+      "name": {
+        "type": "string",
+        "required": true,
+        "unique": true
+      },
+      "description": {
+        "type": "string"
+      },
+      "category": {
+        "type": "string"
+      }
+    },
+    "relations": {},
+    "indexes": [],
+    "timestamps": true
+  },
+  {
+    "name": "RfidTag",
+    "collection": "rfid_tags",
+    "fields": {
+      "tagId": {
+        "type": "string",
+        "required": true,
+        "unique": true
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "available",
+          "active",
+          "deactivated",
+          "lost"
+        ],
+        "default": "available"
+      },
+      "assignedAt": {
+        "type": "date",
+        "default": null
+      },
+      "deactivatedAt": {
+        "type": "date",
+        "default": null
+      },
+      "notes": {
+        "type": "string"
+      }
+    },
+    "relations": {
+      "client": {
+        "target": "Client",
+        "type": "one-to-one",
+        "nullable": true
+      },
+      "assignedBy": {
+        "target": "User",
+        "type": "many-to-one",
+        "nullable": true
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "status": "asc"
+        }
+      },
+      {
+        "fields": {
+          "client": "asc"
+        }
+      }
+    ],
+    "timestamps": true
+  },
+  {
+    "name": "Role",
+    "collection": "roles",
+    "fields": {
+      "name": {
+        "type": "string",
+        "required": true,
+        "unique": true
+      },
+      "description": {
+        "type": "string"
+      }
+    },
+    "relations": {
+      "permissions": {
+        "target": "Permission",
+        "type": "many-to-many",
+        "through": "role_permissions"
+      }
+    },
+    "indexes": [],
+    "timestamps": true
+  },
+  {
+    "name": "ScanLog",
+    "collection": "scan_logs",
+    "fields": {
+      "scanMethod": {
+        "type": "string",
+        "enum": [
+          "webcam",
+          "pwa_camera"
+        ],
+        "default": "webcam"
+      },
+      "result": {
+        "type": "string",
+        "enum": [
+          "granted",
+          "denied"
+        ],
+        "required": true
+      },
+      "denyReason": {
+        "type": "string",
+        "default": null
+      },
+      "quotaBefore": {
+        "type": "number",
+        "default": null
+      },
+      "quotaAfter": {
+        "type": "number",
+        "default": null
+      },
+      "isReentry": {
+        "type": "boolean",
+        "default": false
+      },
+      "timestamp": {
+        "type": "date",
+        "default": "now"
+      }
+    },
+    "relations": {
+      "ticket": {
+        "target": "Ticket",
+        "type": "many-to-one",
+        "nullable": true
+      },
+      "client": {
+        "target": "Client",
+        "type": "many-to-one",
+        "nullable": true
+      },
+      "activity": {
+        "target": "Activity",
+        "type": "many-to-one",
+        "nullable": true
+      },
+      "scannedBy": {
+        "target": "User",
+        "type": "many-to-one",
+        "required": true
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "client": "asc"
+        }
+      },
+      {
+        "fields": {
+          "timestamp": "desc"
+        }
+      },
+      {
+        "fields": {
+          "result": "asc"
+        }
+      }
+    ],
+    "timestamps": false
+  },
+  {
+    "name": "Setting",
+    "collection": "settings",
+    "fields": {
+      "key": {
+        "type": "string",
+        "required": true,
+        "unique": true
+      },
+      "value": {
+        "type": "json",
+        "required": true
+      }
+    },
+    "relations": {},
+    "indexes": [],
+    "timestamps": true
+  },
+  {
+    "name": "SubscriptionPlan",
+    "collection": "subscription_plans",
+    "fields": {
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "description": {
+        "type": "string"
+      },
+      "type": {
+        "type": "string",
+        "enum": [
+          "temporal",
+          "usage",
+          "mixed"
+        ],
+        "required": true
+      },
+      "duration": {
+        "type": "number",
+        "default": null
+      },
+      "activities": {
+        "type": "array",
+        "arrayOf": {
+          "kind": "embedded",
+          "fields": {
+            "activity": {
+              "type": "string",
+              "required": true
+            },
+            "sessionsCount": {
+              "type": "number",
+              "default": null
+            }
+          }
+        }
+      },
+      "price": {
+        "type": "number",
+        "required": true
+      },
+      "currency": {
+        "type": "string",
+        "default": "DA"
+      },
+      "isActive": {
+        "type": "boolean",
+        "default": true
+      }
+    },
+    "relations": {},
+    "indexes": [
+      {
+        "fields": {
+          "isActive": "asc"
+        }
+      }
+    ],
+    "timestamps": true
+  },
+  {
+    "name": "Ticket",
+    "collection": "tickets",
+    "fields": {
+      "ticketNumber": {
+        "type": "string",
+        "unique": true
+      },
+      "ticketType": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "cadeau"
+        ],
+        "default": "standard"
+      },
+      "qrCode": {
+        "type": "string",
+        "unique": true
+      },
+      "clientName": {
+        "type": "string",
+        "required": true
+      },
+      "activityName": {
+        "type": "string",
+        "required": true
+      },
+      "validityMode": {
+        "type": "string",
+        "required": true
+      },
+      "validUntil": {
+        "type": "date",
+        "default": null
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "active",
+          "used",
+          "expired",
+          "cancelled"
+        ],
+        "default": "active"
+      },
+      "scannedAt": {
+        "type": "date",
+        "default": null
+      },
+      "amount": {
+        "type": "number",
+        "required": true,
+        "default": 0
+      },
+      "currency": {
+        "type": "string",
+        "default": "DA"
+      },
+      "printCount": {
+        "type": "number",
+        "default": 0
+      }
+    },
+    "relations": {
+      "client": {
+        "target": "Client",
+        "type": "many-to-one",
+        "required": true
+      },
+      "clientAccess": {
+        "target": "ClientAccess",
+        "type": "many-to-one",
+        "required": true
+      },
+      "activity": {
+        "target": "Activity",
+        "type": "many-to-one",
+        "required": true
+      },
+      "sourceClient": {
+        "target": "Client",
+        "type": "many-to-one",
+        "nullable": true
+      },
+      "scannedBy": {
+        "target": "User",
+        "type": "many-to-one",
+        "nullable": true
+      },
+      "createdBy": {
+        "target": "User",
+        "type": "many-to-one",
+        "required": true
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "client": "asc"
+        }
+      },
+      {
+        "fields": {
+          "status": "asc"
+        }
+      },
+      {
+        "fields": {
+          "validUntil": "asc"
+        }
+      }
+    ],
+    "timestamps": true
+  },
+  {
+    "name": "User",
+    "collection": "users",
+    "fields": {
+      "email": {
+        "type": "string",
+        "required": true,
+        "unique": true,
+        "lowercase": true,
+        "trim": true
+      },
+      "password": {
+        "type": "string",
+        "required": true
+      },
+      "firstName": {
+        "type": "string",
+        "required": true,
+        "trim": true
+      },
+      "lastName": {
+        "type": "string",
+        "required": true,
+        "trim": true
+      },
+      "phone": {
+        "type": "string",
+        "trim": true
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "active",
+          "locked",
+          "disabled"
+        ],
+        "default": "active"
+      },
+      "lastLoginAt": {
+        "type": "date"
+      }
+    },
+    "relations": {
+      "roles": {
+        "target": "Role",
+        "type": "many-to-many",
+        "through": "user_roles"
+      }
+    },
+    "indexes": [
+      {
+        "fields": {
+          "status": "asc"
+        }
+      }
+    ],
+    "timestamps": true
+  }
+]
