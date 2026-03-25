@@ -198,6 +198,12 @@ ${C.cyan}└──────────────────────�
   // 8. Health check
   app.get('/health', async () => ({ status: 'ok', transports: enabledNames, entities: schemas.map(s => s.name) }));
 
+  // 8b. Home page — net dashboard
+  app.get('/', async (req, reply) => {
+    reply.type('text/html');
+    return getNetDashboardHtml(config.port, enabledNames, schemas, maskedUri);
+  });
+
   // 9. Listen
   await app.listen({ port: config.port, host: '0.0.0.0' });
 
@@ -309,4 +315,208 @@ function registerRestRoutes(
       options: body.options as any,
     }, reply);
   });
+}
+
+// ============================================================
+// Net Dashboard HTML
+// ============================================================
+
+function getNetDashboardHtml(port: number, transports: string[], schemas: EntitySchema[], dbUri: string): string {
+  const dialect = process.env.DB_DIALECT || 'unknown';
+  const entityList = schemas.map(s => s.name);
+  const restEntities = schemas.map(s => `<li><a href="/api/v1/${s.collection}" target="_blank">/api/v1/${s.collection}</a> <span style="color:#94a3b8">(${s.name})</span></li>`).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>@mostajs/net</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0}
+    .container{max-width:1000px;margin:0 auto;padding:2rem}
+    h1{font-size:1.5rem;margin-bottom:.5rem;color:#38bdf8}
+    h2{font-size:1.1rem;margin:1.5rem 0 .5rem;color:#94a3b8}
+    .card{background:#1e293b;border-radius:8px;padding:1rem;margin:.5rem 0}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin:.5rem 0}
+    .stat{text-align:center;padding:1rem}
+    .stat .num{font-size:2rem;font-weight:bold;color:#38bdf8}
+    .stat .label{color:#94a3b8;font-size:.85rem}
+    a{color:#38bdf8;text-decoration:none} a:hover{text-decoration:underline}
+    ul{list-style:none;padding:0} li{padding:.25rem 0;font-size:.9rem}
+    .tag{display:inline-block;padding:.15rem .5rem;border-radius:4px;font-size:.75rem;margin:.1rem}
+    .tag-on{background:#064e3b;color:#6ee7b7} .tag-off{background:#1e293b;color:#64748b;border:1px solid #334155}
+    .mono{font-family:monospace;font-size:.8rem;color:#94a3b8}
+    .btn{padding:.4rem .8rem;border:none;border-radius:4px;cursor:pointer;font-size:.85rem;background:#3b82f6;color:#fff}
+    .btn:hover{opacity:.85}
+    select,input,textarea{padding:.5rem;border:1px solid #334155;border-radius:4px;background:#0f172a;color:#e2e8f0;width:100%;margin:.25rem 0}
+    textarea{font-family:monospace;font-size:.8rem;resize:vertical}
+    pre{background:#0f172a;padding:1rem;border-radius:6px;overflow:auto;font-size:.8rem;max-height:400px;white-space:pre-wrap;color:#e2e8f0}
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>@mostajs/net</h1>
+  <p style="color:#94a3b8;margin-bottom:1rem">Multi-protocol transport server — <a href="/_admin/">Admin Panel</a></p>
+
+  <div class="grid">
+    <div class="card stat"><div class="num">${entityList.length}</div><div class="label">Entities</div></div>
+    <div class="card stat"><div class="num">${transports.length}</div><div class="label">Transports</div></div>
+    <div class="card stat"><div class="num">${entityList.length * transports.length}</div><div class="label">Endpoints</div></div>
+  </div>
+
+  <h2>Configuration</h2>
+  <div class="card">
+    <table style="width:100%;font-size:.9rem">
+      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Dialect</td><td><b>${dialect}</b> <span class="mono">${dbUri}</span></td></tr>
+      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Port</td><td><b>${port}</b></td></tr>
+      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Pool</td><td>${process.env.DB_POOL_SIZE || '10'}</td></tr>
+      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Strategy</td><td>${process.env.DB_SCHEMA_STRATEGY || 'none'}</td></tr>
+      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Show SQL</td><td>${process.env.DB_SHOW_SQL === 'true' ? '✅' : '❌'} Format: ${process.env.DB_FORMAT_SQL === 'true' ? '✅' : '❌'} Highlight: ${process.env.DB_HIGHLIGHT_SQL === 'true' ? '✅' : '❌'}</td></tr>
+    </table>
+  </div>
+
+  <h2>Transports</h2>
+  <div class="card">
+    ${['rest','graphql','ws','sse','jsonrpc','mcp','grpc','trpc','odata','nats','arrow'].map(t =>
+      `<span class="tag ${transports.includes(t) ? 'tag-on' : 'tag-off'}">${t}</span>`
+    ).join(' ')}
+  </div>
+
+  <h2>REST Endpoints</h2>
+  <div class="card">
+    <ul>${restEntities}</ul>
+    <p style="margin-top:.5rem;font-size:.8rem;color:#64748b">Chaque entite expose : GET (list), GET/:id, GET/count, POST, PUT/:id, DELETE/:id, POST/search</p>
+  </div>
+
+  <h2>Quick Links</h2>
+  <div class="card">
+    <ul>
+      <li><a href="/health" target="_blank">/health</a> — status du serveur</li>
+      ${transports.includes('graphql') ? '<li><a href="/graphql" target="_blank">/graphql</a> — GraphiQL IDE</li>' : ''}
+      ${transports.includes('sse') ? '<li><a href="/events" target="_blank">/events</a> — Server-Sent Events stream</li>' : ''}
+      ${transports.includes('jsonrpc') ? '<li><a href="/rpc" target="_blank">/rpc</a> — JSON-RPC method discovery</li>' : ''}
+      ${transports.includes('ws') ? '<li><span class="mono">ws://localhost:' + port + '/ws</span> — WebSocket</li>' : ''}
+      <li><a href="/_admin/" target="_blank">/_admin/</a> — Admin panel (config, API keys, explorer)</li>
+    </ul>
+  </div>
+
+  <h2>API Explorer</h2>
+  <div class="card">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem;margin-bottom:.5rem">
+      <div>
+        <label style="font-size:.75rem;color:#94a3b8">Transport</label>
+        <select id="exTransport">
+          <option value="rest">REST</option>
+          ${transports.includes('graphql') ? '<option value="graphql">GraphQL</option>' : ''}
+          ${transports.includes('jsonrpc') ? '<option value="jsonrpc">JSON-RPC</option>' : ''}
+        </select>
+      </div>
+      <div>
+        <label style="font-size:.75rem;color:#94a3b8">Entite</label>
+        <select id="exEntity">${entityList.map(e => `<option value="${e}">${e}</option>`).join('')}</select>
+      </div>
+      <div>
+        <label style="font-size:.75rem;color:#94a3b8">Operation</label>
+        <select id="exOp">
+          <option value="findAll">findAll (GET)</option>
+          <option value="findById">findById (GET /id)</option>
+          <option value="count">count (GET /count)</option>
+          <option value="create">create (POST)</option>
+          <option value="update">update (PUT /id)</option>
+          <option value="delete">delete (DELETE /id)</option>
+        </select>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem">
+      <div>
+        <label style="font-size:.75rem;color:#94a3b8">ID <span style="color:#64748b">(findById, update, delete)</span></label>
+        <input id="exId" placeholder="uuid..."/>
+      </div>
+      <div>
+        <label style="font-size:.75rem;color:#94a3b8">API Key <span style="color:#64748b">(optionnel)</span></label>
+        <input id="exApiKey" placeholder="msk_live_..."/>
+      </div>
+    </div>
+    <div>
+      <label style="font-size:.75rem;color:#94a3b8">Body (JSON)</label>
+      <textarea id="exBody" rows="3" placeholder='{"name":"Dr Madani","email":"drmdh@msn.com"}'></textarea>
+    </div>
+    <div style="display:flex;gap:.5rem;margin-top:.5rem;align-items:center">
+      <button class="btn" onclick="doExplore()">Executer</button>
+      <span id="exStatus" style="font-size:.85rem;color:#94a3b8"></span>
+    </div>
+    <div id="exResult" style="margin-top:.5rem;display:none">
+      <pre id="exOutput"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE='http://localhost:${port}';
+const SCHEMAS=${JSON.stringify(schemas.map(s => ({ name: s.name, collection: s.collection })))};
+
+async function doExplore(){
+  const transport=document.getElementById('exTransport').value;
+  const entityName=document.getElementById('exEntity').value;
+  const entity=SCHEMAS.find(s=>s.name===entityName);
+  const col=entity?entity.collection:entityName.toLowerCase()+'s';
+  const op=document.getElementById('exOp').value;
+  const id=document.getElementById('exId').value.trim();
+  const body=document.getElementById('exBody').value.trim();
+  const apiKey=document.getElementById('exApiKey').value.trim();
+  const statusEl=document.getElementById('exStatus');
+  const resultEl=document.getElementById('exResult');
+  const outputEl=document.getElementById('exOutput');
+
+  statusEl.textContent='Envoi...';
+  resultEl.style.display='none';
+
+  const t0=performance.now();
+  let url='',method='GET',reqBody=null;
+  const headers={'Content-Type':'application/json'};
+  if(apiKey)headers['Authorization']='Bearer '+apiKey;
+
+  try{
+    if(transport==='rest'){
+      switch(op){
+        case 'findAll':url=BASE+'/api/v1/'+col;break;
+        case 'findById':url=BASE+'/api/v1/'+col+'/'+id;break;
+        case 'count':url=BASE+'/api/v1/'+col+'/count';break;
+        case 'create':url=BASE+'/api/v1/'+col;method='POST';reqBody=body||'{}';break;
+        case 'update':url=BASE+'/api/v1/'+col+'/'+id;method='PUT';reqBody=body||'{}';break;
+        case 'delete':url=BASE+'/api/v1/'+col+'/'+id;method='DELETE';break;
+      }
+    }else if(transport==='graphql'){
+      url=BASE+'/graphql';method='POST';
+      const e=entityName.charAt(0).toLowerCase()+entityName.slice(1)+'s';
+      if(op==='findAll')reqBody=JSON.stringify({query:'{'+e+'{id}}'});
+      else if(op==='count')reqBody=JSON.stringify({query:'{'+e+'Count}'});
+      else reqBody=body||JSON.stringify({query:'{__schema{types{name}}}'});
+    }else if(transport==='jsonrpc'){
+      url=BASE+'/rpc';method='POST';
+      let params={};
+      if(body)try{params=JSON.parse(body)}catch{}
+      if(id)params.id=id;
+      reqBody=JSON.stringify({jsonrpc:'2.0',method:entityName+'.'+op,params,id:1});
+    }
+
+    const opts={method,headers};
+    if(reqBody)opts.body=reqBody;
+    const r=await fetch(url,opts);
+    const ms=Math.round(performance.now()-t0);
+    let data;
+    try{data=await r.json()}catch{data=await r.text()}
+
+    statusEl.innerHTML='<span style="color:'+(r.ok?'#22c55e':'#ef4444')+'">'+r.status+'</span> — '+ms+'ms — '+method+' '+url;
+    outputEl.textContent=typeof data==='string'?data:JSON.stringify(data,null,2);
+    resultEl.style.display='block';
+  }catch(e){
+    statusEl.innerHTML='<span style="color:#ef4444">Erreur: '+e.message+'</span>';
+  }
+}
+</script>
+</body>
+</html>`;
 }
