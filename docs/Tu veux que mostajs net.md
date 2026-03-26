@@ -115,4 +115,49 @@ code 0)
 
 
 
+● @mostajs/net@1.0.6 publié. Les boutons dans l'IHM :
 
+  ┌───────────────┬──────────────────────────────────────────────────┐
+  │    Bouton     │                      Action                      │
+  ├───────────────┼──────────────────────────────────────────────────┤
+  │ Recharger     │ Relit .env.local + déconnecte + reconnecte avec  │
+  │ config        │ la nouvelle config + reload page                 │
+  ├───────────────┼──────────────────────────────────────────────────┤
+  │ Tester        │ Ping la DB                                       │
+  │ connexion     │                                                  │
+  ├───────────────┼──────────────────────────────────────────────────┤
+  │ Reconnecter   │ disconnectDialect() + getDialect() +             │
+  │               │ initSchema()                                     │
+  ├───────────────┼──────────────────────────────────────────────────┤
+  │ Créer la base │ CREATE DATABASE                                  │
+  ├───────────────┼──────────────────────────────────────────────────┤
+  │ Appliquer     │ initSchema() — crée/met à jour les tables        │
+  │ schéma        │                                                  │
+  └───────────────┴──────────────────────────────────────────────────┘
+
+  Le flux typique :
+  1. Démarre ./start-net.sh (même sans DB)
+  2. Modifie .env.local (change dialect/URI)
+  3. Clique Recharger config → relit le fichier, déconnecte, reconnecte
+  4. Si DB inexistante → Créer la base
+  5. Appliquer schéma → crée les tables
+  
+  
+<pre><font color="#FFFFFF">●</font> <font color="#B1B9F9">@mostajs/net@1.0.5</font> publié. Le serveur net :
+
+  ┌───────────────────┬───────────────────────────────────────────────────┐
+  │     Situation     │                   Comportement                    │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ DB disponible     │ Connecte, affiche ✅ Connecté                     │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ DB indisponible   │ Affiche ⚠️  message explicatif, démarre quand même │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ DB inexistante    │ Bouton &quot;Créer la base&quot;                            │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ Schemas manquants │ Bouton &quot;Scanner&quot; ou &quot;Uploader ZIP&quot;                │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ Après correction  │ Bouton &quot;Reconnecter&quot; → tente la connexion         │
+  ├───────────────────┼───────────────────────────────────────────────────┤
+  │ Appliquer schéma  │ Bouton &quot;Appliquer schéma&quot; → crée les tables       │
+  └───────────────────┴───────────────────────────────────────────────────┘
+</pre>
