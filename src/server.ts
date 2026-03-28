@@ -4,7 +4,7 @@
 
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import { EntityService, getAllSchemas, getDialect, registerSchemas } from '@mostajs/orm';
+import { EntityService, getAllSchemas, getDialect, registerSchemas, getSchemaByCollection } from '@mostajs/orm';
 import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
 import { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip } from './lib/schema-loader.js';
 import { loadNetConfig, getEnabledTransports } from './core/config.js';
@@ -78,6 +78,11 @@ export async function startServer(): Promise<NetServer> {
       generateSchemasJson(fromDirs);
       console.log(`  Scanned ${schemas.length} schemas from ${process.env.SCHEMAS_PATH} → saved schemas.json`);
     }
+  }
+
+  // 4b. Re-init dialect with loaded schemas (so relations/junction tables work)
+  if (dialect && schemas.length > 0) {
+    await dialect.initSchema(schemas);
   }
 
   // 5. Display startup banner
@@ -156,11 +161,11 @@ ${C.cyan}└──────────────────────�
     // Start the transport
     await transport.start(transportConfig);
 
-    // Mount REST routes directly on the shared Fastify instance
+    // Mount REST routes on the shared Fastify instance
+    // Routes are GENERIC (/:collection) — resolves entity at runtime
+    // This allows hot-reload when schemas are uploaded via /api/upload-schemas-json
     if (transport instanceof RestTransport) {
-      for (const schema of schemas) {
-        registerRestRoutes(app, schema, ormHandler);
-      }
+      registerDynamicRestRoutes(app, ormHandler);
     }
 
     // Mount SSE route and wire EntityService events → broadcast
@@ -317,6 +322,56 @@ ${C.cyan}└──────────────────────�
 
   // 8d. Schemas management API
   app.get('/api/schemas-config', async () => getSchemasConfig());
+
+  // 8e. Compare schema — delegates to ORM diffSchemas()
+  app.post('/api/compare-schema', async (req) => {
+    const { schema } = req.body as { schema: any };
+    if (!schema?.name) return { data: { compatible: false, exists: false, diffs: [], error: 'schema.name required' } };
+
+    const existing = getAllSchemas().find(s => s.name === schema.name);
+    if (!existing) {
+      return { data: { compatible: false, exists: false, diffs: [] } };
+    }
+
+    try {
+      const { diffSchemas } = await import('@mostajs/orm');
+      const diffs = diffSchemas([existing], [schema]);
+      return {
+        data: {
+          compatible: diffs.length === 0,
+          exists: true,
+          diffs: diffs.map((d: any) => ({ type: d.type, field: d.field ?? d.collection, detail: d.detail ?? d.type })),
+        },
+      };
+    } catch {
+      // diffSchemas not available — fallback to name check only
+      return { data: { compatible: true, exists: true, diffs: [] } };
+    }
+  });
+
+  // 8f. Receive schemas from client (setup wizard sends them by HTTP)
+  app.post('/api/upload-schemas-json', async (req) => {
+    const body = req.body as { schemas?: any[] };
+    if (!body?.schemas?.length) return { ok: false, error: 'No schemas provided' };
+    try {
+      // Register schemas in ORM
+      registerSchemas(body.schemas);
+      // Re-init dialect with new schemas (create tables if strategy=update)
+      if (dialect) {
+        await dialect.initSchema(getAllSchemas());
+      }
+      // Save schemas.json for next startup
+      const fs = await import('fs');
+      fs.writeFileSync('schemas.json', JSON.stringify(body.schemas, null, 2));
+      // Schemas sauvés + tables créées — redémarrage pour enregistrer les routes
+      // Délai 2s pour laisser la réponse HTTP arriver au client avant exit
+      console.log(`\n  📦 ${body.schemas.length} schemas reçus et sauvés — redémarrage dans 2s...\n`);
+      setTimeout(() => process.exit(0), 2000);
+      return { ok: true, count: body.schemas.length, needsRestart: true, schemas: body.schemas.map((s: any) => s.name) };
+    } catch (e: any) {
+      return { ok: false, error: e.message };
+    }
+  });
 
   app.post('/api/scan-schemas', async (req) => {
     const body = req.body as { path?: string };
@@ -498,8 +553,171 @@ ${C.cyan}└──────────────────────�
 }
 
 /**
- * Register REST routes directly on the main Fastify instance.
- * This avoids the complexity of merging two Fastify instances.
+ * Register DYNAMIC REST routes using :collection parameter.
+ * Resolves entity at runtime from the ORM registry — supports hot-reload of schemas.
+ */
+function registerDynamicRestRoutes(
+  app: FastifyInstance,
+  ormHandler: (req: OrmRequest, ctx: TransportContext) => Promise<OrmResponse>,
+): void {
+  const prefix = '/api/v1';
+
+  const handle = async (ormReq: OrmRequest, reply: any) => {
+    const ctx: TransportContext = { transport: 'rest' };
+    const res = await ormHandler(ormReq, ctx);
+    if (res.status === 'error') {
+      reply.status(res.error?.code === 'ENTITY_NOT_FOUND' || res.error?.code === 'EntityNotFoundError' ? 404 :
+                   res.error?.code?.startsWith('MISSING') ? 400 :
+                   res.error?.code === 'UNKNOWN_ENTITY' ? 404 : 500);
+    }
+    return res;
+  };
+
+  /** Resolve collection name → entity name from ORM registry */
+  const resolveEntity = (collection: string): string | null => {
+    try {
+      const schema = getSchemaByCollection(collection);
+      return schema?.name || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const parseOpts = (q: Record<string, string>) => {
+    const options: any = {};
+    if (q.sort) options.sort = JSON.parse(q.sort);
+    if (q.limit) options.limit = parseInt(q.limit, 10);
+    if (q.skip) options.skip = parseInt(q.skip, 10);
+    if (q.select) options.select = q.select.split(',');
+    if (q.exclude) options.exclude = q.exclude.split(',');
+    const relations = (q.relations || q.include)?.split(',').filter(Boolean);
+    return { options, relations: relations?.length ? relations : undefined };
+  };
+
+  const notFound = (col: string, reply: any) => {
+    reply.status(404);
+    return { status: 'error', error: { code: 'UNKNOWN_ENTITY', message: `Collection "${col}" not found. Upload schemas first via POST /api/upload-schemas-json` } };
+  };
+
+  // ── Specific routes BEFORE parametric /:id ──
+
+  app.get(`${prefix}/:col/count`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const q = req.query as Record<string, string>;
+    return handle({ op: 'count', entity, filter: q.filter ? JSON.parse(q.filter) : {} }, reply);
+  });
+
+  app.get(`${prefix}/:col/one`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const q = req.query as Record<string, string>;
+    const { options, relations } = parseOpts(q);
+    return handle({ op: 'findOne', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply);
+  });
+
+  app.post(`${prefix}/:col/search`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const body = req.body as Record<string, unknown>;
+    return handle({ op: 'search', entity, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply);
+  });
+
+  app.post(`${prefix}/:col/upsert`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const { filter, data } = req.body as { filter: any; data: any };
+    return handle({ op: 'upsert', entity, filter, data }, reply);
+  });
+
+  app.post(`${prefix}/:col/aggregate`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const { stages } = req.body as { stages: any[] };
+    return handle({ op: 'aggregate', entity, stages }, reply);
+  });
+
+  app.put(`${prefix}/:col/bulk`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const { filter, data } = req.body as { filter: any; data: any };
+    return handle({ op: 'updateMany', entity, filter, data }, reply);
+  });
+
+  app.delete(`${prefix}/:col/bulk`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const body = req.body as Record<string, unknown> | null;
+    const q = req.query as Record<string, string>;
+    const filter = body?.filter || (q.filter ? JSON.parse(q.filter) : {});
+    return handle({ op: 'deleteMany', entity, filter }, reply);
+  });
+
+  // ── Parametric /:col/:id routes ──
+
+  app.get(`${prefix}/:col/:id`, async (req, reply) => {
+    const { col, id } = req.params as { col: string; id: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const q = req.query as Record<string, string>;
+    const { options, relations } = parseOpts(q);
+    return handle({ op: 'findById', entity, id, options, relations }, reply);
+  });
+
+  app.put(`${prefix}/:col/:id`, async (req, reply) => {
+    const { col, id } = req.params as { col: string; id: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    return handle({ op: 'update', entity, id, data: req.body as Record<string, unknown> }, reply);
+  });
+
+  app.delete(`${prefix}/:col/:id`, async (req, reply) => {
+    const { col, id } = req.params as { col: string; id: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    return handle({ op: 'delete', entity, id }, reply);
+  });
+
+  app.post(`${prefix}/:col/:id/addToSet`, async (req, reply) => {
+    const { col, id } = req.params as { col: string; id: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const { field, value } = req.body as { field: string; value: unknown };
+    return handle({ op: 'addToSet', entity, id, field, value }, reply);
+  });
+
+  app.post(`${prefix}/:col/:id/pull`, async (req, reply) => {
+    const { col, id } = req.params as { col: string; id: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const { field, value } = req.body as { field: string; value: unknown };
+    return handle({ op: 'pull', entity, id, field, value }, reply);
+  });
+
+  app.post(`${prefix}/:col/:id/increment`, async (req, reply) => {
+    const { col, id } = req.params as { col: string; id: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const { field, amount } = req.body as { field: string; amount: number };
+    return handle({ op: 'increment', entity, id, field, amount }, reply);
+  });
+
+  // ── Collection-level routes ──
+
+  app.get(`${prefix}/:col`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const q = req.query as Record<string, string>;
+    const { options, relations } = parseOpts(q);
+    return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply);
+  });
+
+  app.post(`${prefix}/:col`, async (req, reply) => {
+    const { col } = req.params as { col: string };
+    const entity = resolveEntity(col); if (!entity) return notFound(col, reply);
+    const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply);
+    if (reply.statusCode < 400) reply.status(201);
+    return res;
+  });
+}
+
+/**
+ * Register REST routes directly on the main Fastify instance (legacy per-collection).
+ * Kept for compatibility — used by RestTransport internally.
  */
 function registerRestRoutes(
   app: FastifyInstance,
@@ -519,64 +737,106 @@ function registerRestRoutes(
     return res;
   };
 
-  // GET /api/v1/{collection}
-  app.get(`${prefix}/${col}`, async (req, reply) => {
-    const q = req.query as Record<string, string>;
-    return handle({
-      op: 'findAll', entity: schema.name,
-      filter: q.filter ? JSON.parse(q.filter) : {},
-      options: {
-        sort: q.sort ? JSON.parse(q.sort) : undefined,
-        limit: q.limit ? parseInt(q.limit, 10) : undefined,
-        skip: q.skip ? parseInt(q.skip, 10) : undefined,
-      },
-    }, reply);
-  });
+  const parseOpts = (q: Record<string, string>) => {
+    const options: any = {};
+    if (q.sort) options.sort = JSON.parse(q.sort);
+    if (q.limit) options.limit = parseInt(q.limit, 10);
+    if (q.skip) options.skip = parseInt(q.skip, 10);
+    if (q.select) options.select = q.select.split(',');
+    if (q.exclude) options.exclude = q.exclude.split(',');
+    const relations = (q.relations || q.include)?.split(',').filter(Boolean);
+    return { options, relations: relations?.length ? relations : undefined };
+  };
 
-  // GET /api/v1/{collection}/count
+  // ── Specific routes BEFORE parametric /:id ──
+
   app.get(`${prefix}/${col}/count`, async (req, reply) => {
     const q = req.query as Record<string, string>;
     return handle({ op: 'count', entity: schema.name, filter: q.filter ? JSON.parse(q.filter) : {} }, reply);
   });
 
-  // GET /api/v1/{collection}/:id
+  app.get(`${prefix}/${col}/one`, async (req, reply) => {
+    const q = req.query as Record<string, string>;
+    const { options, relations } = parseOpts(q);
+    return handle({ op: 'findOne', entity: schema.name, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply);
+  });
+
+  app.post(`${prefix}/${col}/search`, async (req, reply) => {
+    const body = req.body as Record<string, unknown>;
+    return handle({ op: 'search', entity: schema.name, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply);
+  });
+
+  app.post(`${prefix}/${col}/upsert`, async (req, reply) => {
+    const { filter, data } = req.body as { filter: any; data: any };
+    return handle({ op: 'upsert', entity: schema.name, filter, data }, reply);
+  });
+
+  app.post(`${prefix}/${col}/aggregate`, async (req, reply) => {
+    const { stages } = req.body as { stages: any[] };
+    return handle({ op: 'aggregate', entity: schema.name, stages }, reply);
+  });
+
+  app.put(`${prefix}/${col}/bulk`, async (req, reply) => {
+    const { filter, data } = req.body as { filter: any; data: any };
+    return handle({ op: 'updateMany', entity: schema.name, filter, data }, reply);
+  });
+
+  app.delete(`${prefix}/${col}/bulk`, async (req, reply) => {
+    const body = req.body as Record<string, unknown> | null;
+    const q = req.query as Record<string, string>;
+    const filter = body?.filter || (q.filter ? JSON.parse(q.filter) : {});
+    return handle({ op: 'deleteMany', entity: schema.name, filter }, reply);
+  });
+
+  // ── Parametric /:id routes ──
+
   app.get(`${prefix}/${col}/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const q = req.query as Record<string, string>;
-    return handle({
-      op: 'findById', entity: schema.name, id,
-      relations: q.include ? q.include.split(',') : undefined,
-    }, reply);
+    const { options, relations } = parseOpts(q);
+    return handle({ op: 'findById', entity: schema.name, id, options, relations }, reply);
   });
 
-  // POST /api/v1/{collection}
-  app.post(`${prefix}/${col}`, async (req, reply) => {
-    const res = await handle({ op: 'create', entity: schema.name, data: req.body as Record<string, unknown> }, reply);
-    if (reply.statusCode < 400) reply.status(201);
-    return res;
-  });
-
-  // PUT /api/v1/{collection}/:id
   app.put(`${prefix}/${col}/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
     return handle({ op: 'update', entity: schema.name, id, data: req.body as Record<string, unknown> }, reply);
   });
 
-  // DELETE /api/v1/{collection}/:id
   app.delete(`${prefix}/${col}/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
     return handle({ op: 'delete', entity: schema.name, id }, reply);
   });
 
-  // POST /api/v1/{collection}/search
-  app.post(`${prefix}/${col}/search`, async (req, reply) => {
-    const body = req.body as Record<string, unknown>;
-    return handle({
-      op: 'search', entity: schema.name,
-      query: body.query as string,
-      searchFields: body.fields as string[],
-      options: body.options as any,
-    }, reply);
+  app.post(`${prefix}/${col}/:id/addToSet`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { field, value } = req.body as { field: string; value: unknown };
+    return handle({ op: 'addToSet', entity: schema.name, id, field, value }, reply);
+  });
+
+  app.post(`${prefix}/${col}/:id/pull`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { field, value } = req.body as { field: string; value: unknown };
+    return handle({ op: 'pull', entity: schema.name, id, field, value }, reply);
+  });
+
+  app.post(`${prefix}/${col}/:id/increment`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { field, amount } = req.body as { field: string; amount: number };
+    return handle({ op: 'increment', entity: schema.name, id, field, amount }, reply);
+  });
+
+  // ── Collection-level routes ──
+
+  app.get(`${prefix}/${col}`, async (req, reply) => {
+    const q = req.query as Record<string, string>;
+    const { options, relations } = parseOpts(q);
+    return handle({ op: 'findAll', entity: schema.name, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply);
+  });
+
+  app.post(`${prefix}/${col}`, async (req, reply) => {
+    const res = await handle({ op: 'create', entity: schema.name, data: req.body as Record<string, unknown> }, reply);
+    if (reply.statusCode < 400) reply.status(201);
+    return res;
   });
 }
 
