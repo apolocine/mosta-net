@@ -210,6 +210,163 @@ export class McpTransport implements ITransport {
         return { content: [{ type: 'text' as const, text: String(res.data) }] };
       },
     );
+
+    // Tool: {Entity}_findOne — find one entity by filter
+    server.registerTool(
+      `${name}_findOne`,
+      {
+        description: `Find a single ${name} entity matching a filter.`,
+        inputSchema: {
+          filter: z.string().describe('JSON filter object'),
+          relations: z.string().optional().describe('Comma-separated relation names to populate'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const relations = params.relations?.split(',').filter(Boolean);
+        const res = await this.callOrm({ op: 'findOne', entity: name, filter: JSON.parse(params.filter), relations: relations?.length ? relations : undefined });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(res.data, null, 2) }] };
+      },
+    );
+
+    // Tool: {Entity}_search — full-text search
+    server.registerTool(
+      `${name}_search`,
+      {
+        description: `Search ${name} entities by text query.`,
+        inputSchema: {
+          query: z.string().describe('Search text'),
+          fields: z.string().optional().describe('Comma-separated field names to search in'),
+          limit: z.number().optional().describe('Max results'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'search', entity: name, query: params.query, searchFields: params.fields?.split(','), options: { limit: params.limit } });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(res.data, null, 2) }] };
+      },
+    );
+
+    // Tool: {Entity}_upsert — insert or update
+    server.registerTool(
+      `${name}_upsert`,
+      {
+        description: `Insert or update a ${name} entity. Finds by filter, creates if not found.`,
+        inputSchema: {
+          filter: z.string().describe('JSON filter to match existing entity'),
+          data: z.string().describe('JSON data to insert or update'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'upsert', entity: name, filter: JSON.parse(params.filter), data: JSON.parse(params.data) });
+        if (res.status === 'error') return { content: [{ type: 'text' as const, text: `Error: ${res.error?.message}` }], isError: true };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(res.data, null, 2) }] };
+      },
+    );
+
+    // Tool: {Entity}_deleteMany — delete multiple entities
+    server.registerTool(
+      `${name}_deleteMany`,
+      {
+        description: `Delete multiple ${name} entities matching a filter.`,
+        inputSchema: {
+          filter: z.string().describe('JSON filter object'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'deleteMany', entity: name, filter: JSON.parse(params.filter) });
+        return { content: [{ type: 'text' as const, text: `Deleted: ${res.metadata?.count ?? 0}` }] };
+      },
+    );
+
+    // Tool: {Entity}_updateMany — update multiple entities
+    server.registerTool(
+      `${name}_updateMany`,
+      {
+        description: `Update multiple ${name} entities matching a filter.`,
+        inputSchema: {
+          filter: z.string().describe('JSON filter object'),
+          data: z.string().describe('JSON data to set on matched entities'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'updateMany', entity: name, filter: JSON.parse(params.filter), data: JSON.parse(params.data) });
+        return { content: [{ type: 'text' as const, text: `Updated: ${res.metadata?.count ?? 0}` }] };
+      },
+    );
+
+    // Tool: {Entity}_aggregate — aggregation pipeline
+    server.registerTool(
+      `${name}_aggregate`,
+      {
+        description: `Run an aggregation pipeline on ${name} entities.`,
+        inputSchema: {
+          stages: z.string().describe('JSON array of aggregation stages'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'aggregate', entity: name, stages: JSON.parse(params.stages) });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(res.data, null, 2) }] };
+      },
+    );
+
+    // Tool: {Entity}_addToSet — add value to array field
+    server.registerTool(
+      `${name}_addToSet`,
+      {
+        description: `Add a value to an array field of a ${name} entity (no duplicates).`,
+        inputSchema: {
+          id: z.string().describe(`The ${name} ID`),
+          field: z.string().describe('Array field name'),
+          value: z.string().describe('JSON value to add'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'addToSet', entity: name, id: params.id, field: params.field, value: JSON.parse(params.value) });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(res.data, null, 2) }] };
+      },
+    );
+
+    // Tool: {Entity}_pull — remove value from array field
+    server.registerTool(
+      `${name}_pull`,
+      {
+        description: `Remove a value from an array field of a ${name} entity.`,
+        inputSchema: {
+          id: z.string().describe(`The ${name} ID`),
+          field: z.string().describe('Array field name'),
+          value: z.string().describe('JSON value to remove'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'pull', entity: name, id: params.id, field: params.field, value: JSON.parse(params.value) });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(res.data, null, 2) }] };
+      },
+    );
+
+    // Tool: {Entity}_increment — increment numeric field
+    server.registerTool(
+      `${name}_increment`,
+      {
+        description: `Increment a numeric field of a ${name} entity.`,
+        inputSchema: {
+          id: z.string().describe(`The ${name} ID`),
+          field: z.string().describe('Numeric field name'),
+          amount: z.number().describe('Amount to increment (negative to decrement)'),
+        },
+      },
+      async (params) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'increment', entity: name, id: params.id, field: params.field, amount: params.amount });
+        return { content: [{ type: 'text' as const, text: JSON.stringify(res.data, null, 2) }] };
+      },
+    );
   }
 
   // ============================================================
