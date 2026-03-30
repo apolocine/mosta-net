@@ -35,6 +35,12 @@ export interface NetServer {
  * 6. Listen on MOSTA_NET_PORT
  */
 export async function startServer(): Promise<NetServer> {
+  // 0. Catch unhandled errors (some DB drivers emit fatal errors outside Promises)
+  process.on('uncaughtException', (err) => {
+    console.error(`\n  \x1b[31m⚠ Erreur non-catchée:\x1b[0m ${err.message}`);
+    console.error(`  Le serveur continue — corrigez la config DB depuis l'IHM\n`);
+  });
+
   // 1. Load net config
   const config = loadNetConfig();
 
@@ -44,6 +50,9 @@ export async function startServer(): Promise<NetServer> {
   let dbError = '';
 
   try {
+    if (!process.env.DB_DIALECT || !process.env.SGBD_URI) {
+      throw new Error('DB_DIALECT et SGBD_URI non configurés — utilisez l\'IHM pour choisir un dialecte');
+    }
     dialect = await getDialect();
     entityService = new EntityService(dialect);
   } catch (e: unknown) {
@@ -418,7 +427,35 @@ ${C.cyan}└──────────────────────�
     if (!dialect) return { ok: false, message: 'DB non connectee: ' + dbError };
     try {
       const ok = await dialect.testConnection();
-      return { ok, message: ok ? 'Connexion reussie' : 'Echec de connexion' };
+      if (!ok) return { ok: false, message: 'Echec de connexion' };
+
+      // List registered schemas (in ORM registry)
+      const registeredSchemas = getAllSchemas().map(s => ({
+        name: s.name,
+        collection: s.collection,
+        fields: Object.keys(s.fields).length,
+        relations: Object.keys(s.relations || {}).length,
+      }));
+
+      // List actual tables in DB (if dialect supports it)
+      let dbTables: string[] = [];
+      try {
+        if ((dialect as any).getTableListQuery) {
+          const query = (dialect as any).getTableListQuery();
+          const rows = await (dialect as any).executeQuery(query, []);
+          dbTables = rows.map((r: any) =>
+            r.name || r.TABLE_NAME || r.table_name || Object.values(r)[0]
+          ).filter(Boolean) as string[];
+        }
+      } catch {}
+
+      return {
+        ok: true,
+        message: `Connexion reussie — ${dbTables.length} tables, ${registeredSchemas.length} schemas`,
+        dialect: (dialect as any).dialectType,
+        tables: dbTables,
+        schemas: registeredSchemas,
+      };
     } catch (e: unknown) {
       return { ok: false, message: e instanceof Error ? e.message : 'Erreur' };
     }
@@ -444,43 +481,185 @@ ${C.cyan}└──────────────────────�
     }
   });
 
+  // 8g. Change dialect at runtime (config only — no migration, no auto-reconnect)
+  app.post('/api/change-dialect', async (req) => {
+    const body = req.body as { dialect?: string; uri?: string; connect?: boolean };
+    if (!body?.dialect || !body?.uri) {
+      return { ok: false, error: 'dialect et uri requis' };
+    }
+    try {
+      // 1. Disconnect current dialect
+      const { disconnectDialect } = await import('@mostajs/orm');
+      try { await disconnectDialect(); } catch {}
+      dialect = null;
+      entityService = null;
+
+      // 2. Update process.env
+      process.env.DB_DIALECT = body.dialect;
+      process.env.SGBD_URI = body.uri;
+      process.env.DB_SCHEMA_STRATEGY = 'update';
+
+      // 3. Update env file — write to .env.local if exists, else .env
+      //    Priority: .env.local > .env (same as Node.js/Next.js convention)
+      const fs = await import('fs');
+      const envPath = fs.existsSync('.env.local') ? '.env.local' : '.env';
+      if (fs.existsSync(envPath)) {
+        const lines = fs.readFileSync(envPath, 'utf-8').split('\n');
+        const cleaned: string[] = [];
+        let dbDialectWritten = false;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          // Skip ALL DB_DIALECT and SGBD_URI lines (active or commented from change-dialect)
+          if (/^#?DB_DIALECT=/.test(trimmed) || /^#?SGBD_URI=/.test(trimmed)) {
+            // Keep the original commented templates (from the header)
+            if (trimmed.startsWith('#') && !dbDialectWritten) {
+              // Keep only if it's a template (has a known dialect prefix)
+              const isTemplate = /^#DB_DIALECT=(sqlite|postgres|oracle|mongodb|mysql|mariadb|mssql)$/.test(trimmed)
+                || /^#SGBD_URI=(sqlite|postgresql|oracle|mongodb|mysql|mariadb|mssql):/.test(trimmed)
+                || /^#SGBD_URI=\.\//.test(trimmed);
+              if (isTemplate) { cleaned.push(line); continue; }
+            }
+            continue; // Skip duplicates and active lines
+          }
+          cleaned.push(line);
+        }
+        // Add active lines at the end
+        cleaned.push('DB_DIALECT=' + body.dialect);
+        cleaned.push('SGBD_URI=' + body.uri);
+        fs.writeFileSync(envPath, cleaned.join('\n') + '\n');
+      }
+
+      // 4. Si connect demandé, reconnecter
+      if (body.connect) {
+        dialect = await getDialect();
+        entityService = new EntityService(dialect);
+        const currentSchemas = getAllSchemas();
+        if (currentSchemas.length > 0) {
+          await dialect.initSchema(currentSchemas);
+      }
+
+        dbError = '';
+        return { ok: true, connected: true, message: `Dialecte changé et connecté : ${body.dialect} (${currentSchemas.length} schemas)` };
+      }
+
+      // Sans connect : juste la config
+      dbError = '';
+      return { ok: true, connected: false, message: `Config changée : ${body.dialect} — utilisez "Reconnecter" pour se connecter` };
+    } catch (e: unknown) {
+      dbError = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: dbError };
+    }
+  });
+
+  // 8g2. Restart server (used after config change — relies on start script loop)
+  app.post('/api/restart', async () => {
+    console.log('\n  🔄 Redémarrage demandé via IHM...\n');
+    setTimeout(() => process.exit(0), 500);
+    return { ok: true, message: 'Redémarrage en cours...' };
+  });
+
+  // 8h. Unload schemas (remove from memory registry, delete schemas.json)
+  app.post('/api/unload-schemas', async () => {
+    try {
+      const { clearRegistry } = await import('@mostajs/orm');
+      const count = getAllSchemas().length;
+      clearRegistry();
+      // Supprimer schemas.json pour qu'il ne soit pas rechargé au prochain démarrage
+      const fs = await import('fs');
+      try { fs.unlinkSync('schemas.json'); } catch {}
+      return { ok: true, message: `${count} schemas déchargés — schemas.json supprimé` };
+    } catch (e: unknown) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  // 8i. Truncate tables (empty data, keep structure — via ORM dialect.truncateAll)
+  app.post('/api/truncate-tables', async (req) => {
+    const body = req.body as { confirm?: boolean };
+    if (!body?.confirm) return { ok: false, error: 'Confirmation requise : { "confirm": true }' };
+    if (!dialect) return { ok: false, error: 'DB non connectée' };
+    try {
+      if (dialect.truncateAll) {
+        const truncated = await dialect.truncateAll(getAllSchemas());
+        return { ok: true, message: `${truncated.length} tables vidées`, truncated };
+      }
+      return { ok: false, error: 'Ce dialecte ne supporte pas truncateAll' };
+    } catch (e: unknown) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  // 8j. Drop tables (dangerous — drops actual DB tables via ORM dialect)
+  app.post('/api/drop-tables', async (req) => {
+    const body = req.body as { confirm?: boolean; all?: boolean };
+    if (!body?.confirm) {
+      return { ok: false, error: 'Confirmation requise : { "confirm": true }' };
+    }
+    if (!dialect) {
+      return { ok: false, error: 'DB non connectée' };
+    }
+    try {
+      if (body.all && dialect.dropAllTables) {
+        await dialect.dropAllTables();
+        return { ok: true, message: 'Toutes les tables supprimées' };
+      } else if (dialect.dropSchema) {
+        const currentSchemas = getAllSchemas();
+        const dropped = await dialect.dropSchema(currentSchemas);
+        return { ok: true, message: `${dropped.length} tables supprimées`, dropped };
+      } else {
+        return { ok: false, error: 'Ce dialecte ne supporte pas dropSchema' };
+      }
+    } catch (e: unknown) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
   app.post('/api/reload-config', async () => {
     try {
-      // 1. Reload .env.local
+      // 1. Reload env files (.env then .env.local — local overrides base)
       const fs = await import('fs');
       const path = await import('path');
-      const envPath = path.resolve(process.cwd(), '.env.local');
-      if (fs.existsSync(envPath)) {
-        const content = fs.readFileSync(envPath, 'utf-8');
-        for (const line of content.split('\n')) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith('#')) continue;
-          const eq = trimmed.indexOf('=');
-          if (eq > 0) process.env[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+      for (const envFile of ['.env', '.env.local']) {
+        const envPath = path.resolve(process.cwd(), envFile);
+        if (fs.existsSync(envPath)) {
+          const content = fs.readFileSync(envPath, 'utf-8');
+          for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const eq = trimmed.indexOf('=');
+            if (eq > 0) process.env[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+          }
         }
       }
 
       // 2. Disconnect current DB
       const { disconnectDialect } = await import('@mostajs/orm');
       try { await disconnectDialect(); } catch {}
+      dialect = null;
+      entityService = null;
 
-      // 3. Reconnect with new config
-      dialect = await getDialect();
-      entityService = new EntityService(dialect);
-
-      // 4. Re-init schemas
-      const currentSchemas = getAllSchemas();
-      if (currentSchemas.length > 0) {
-        await dialect.initSchema(currentSchemas);
-      }
-
-      dbError = '';
+      // 3. Try reconnect with new config (non-blocking)
       const newDialect = process.env.DB_DIALECT || 'unknown';
       const newUri = (process.env.SGBD_URI || '').replace(/:([^@]+)@/, ':***@');
-      return { ok: true, message: 'Config rechargee — ' + newDialect + ' (' + newUri + '), ' + currentSchemas.length + ' schemas' };
+      try {
+        if (process.env.DB_DIALECT && process.env.SGBD_URI) {
+          dialect = await getDialect();
+          entityService = new EntityService(dialect);
+          const currentSchemas = getAllSchemas();
+          if (currentSchemas.length > 0) {
+            await dialect.initSchema(currentSchemas);
+          }
+          dbError = '';
+          return { ok: true, message: 'Config rechargee et connectee — ' + newDialect + ' (' + newUri + ')' };
+        }
+      } catch (e: unknown) {
+        dbError = e instanceof Error ? e.message : String(e);
+      }
+
+      // Config rechargée même si la connexion a échoué
+      return { ok: true, message: 'Config rechargee — ' + newDialect + ' (' + newUri + ')' + (dbError ? ' — ⚠ ' + dbError : '') };
     } catch (e: unknown) {
-      dbError = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: dbError };
+      return { ok: true, message: 'Config rechargee — erreur: ' + (e instanceof Error ? e.message : String(e)) };
     }
   });
 
@@ -517,7 +696,12 @@ ${C.cyan}└──────────────────────�
   // 8f. Home page — net dashboard
   app.get('/', async (req, reply) => {
     reply.type('text/html');
-    return getNetDashboardHtml(config.port, enabledNames, schemas, maskedUri, dbError);
+    // Lire les valeurs actuelles (pas celles du démarrage)
+    const currentDialect = process.env.DB_DIALECT || 'unknown';
+    const currentUri = process.env.SGBD_URI || '';
+    const currentMaskedUri = currentUri.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@');
+    const currentSchemas = getAllSchemas();
+    return getNetDashboardHtml(config.port, enabledNames, currentSchemas, currentMaskedUri, dbError);
   });
 
   // 9. Listen
@@ -898,14 +1082,36 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
       <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Strategy</td><td>${process.env.DB_SCHEMA_STRATEGY || 'none'}</td></tr>
       <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Show SQL</td><td>${process.env.DB_SHOW_SQL === 'true' ? '✅' : '❌'} Format: ${process.env.DB_FORMAT_SQL === 'true' ? '✅' : '❌'} Highlight: ${process.env.DB_HIGHLIGHT_SQL === 'true' ? '✅' : '❌'}</td></tr>
     </table>
-    <div style="display:flex;gap:.5rem;margin-top:.75rem;flex-wrap:wrap;align-items:center">
+    <div style="margin-top:.75rem;padding:.75rem;background:#1e293b;border-radius:6px;margin-bottom:.75rem">
+      <label style="font-size:.75rem;color:#94a3b8;display:block;margin-bottom:.3rem">Changer le dialecte</label>
+      <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+        <select id="dialectSelect" onchange="onDialectChange()" style="padding:6px 10px;border-radius:4px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:.85rem">
+          ${['sqlite','postgres','mysql','mariadb','mongodb','oracle','mssql','cockroachdb','db2','hana','hsqldb','spanner','sybase'].map(d =>
+            '<option value="' + d + '"' + (d === dialect ? ' selected' : '') + '>' + d + '</option>'
+          ).join('')}
+        </select>
+        <span id="dialectLabel" style="font-size:.75rem;color:#64748b"></span>
+      </div>
+      <div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:.5rem;align-items:center">
+        <label style="font-size:.75rem;color:#94a3b8">URI</label>
+        <input id="dialectUri" value="${dbUri}" style="padding:6px 10px;border-radius:4px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:.85rem;font-family:monospace"/>
+        <button class="btn" onclick="doChangeDialect()" style="background:#8b5cf6">Appliquer</button>
+        <span id="dialectStatus" style="font-size:.85rem;color:#94a3b8"></span>
+      </div>
+      <div id="dialectHint" style="font-size:.7rem;color:#475569;margin-top:.3rem;font-family:monospace"></div>
+    </div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
       <button class="btn" onclick="doReloadConfig()" style="background:#06b6d4">Recharger config</button>
       <button class="btn" onclick="doTestConn()" style="background:#3b82f6">Tester connexion</button>
       <button class="btn" onclick="doReconnect()" style="background:#8b5cf6">Reconnecter</button>
       <button class="btn" onclick="doCreateDb()" style="background:#22c55e">Créer la base</button>
       <button class="btn" onclick="doApplySchema()" style="background:#f59e0b;color:#000">Appliquer schéma</button>
+      <button class="btn" onclick="doUnloadSchemas()" style="background:#f97316">Décharger schéma</button>
+      <button class="btn" onclick="doTruncate()" style="background:#f59e0b;color:#000">Vider tables</button>
+      <button class="btn" onclick="doDropTables()" style="background:#ef4444">Drop tables</button>
       <span id="dbStatus" style="font-size:.85rem;color:#94a3b8">${dbErr ? '❌ ' + dbErr : '✅ Connecté'}</span>
     </div>
+    <div id="dbTestDetail"></div>
   </div>
 
   <h2>Transports</h2>
@@ -1365,8 +1571,44 @@ async function doTestConn(){
   try{
     const r=await fetch(BASE+'/api/test-connection',{method:'POST'});
     const d=await r.json();
-    el.innerHTML=d.ok?'<span style="color:#22c55e">✅ '+d.message+'</span>':'<span style="color:#ef4444">❌ '+d.message+'</span>';
-  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+    if(d.ok){
+      el.innerHTML='<span style="color:#22c55e">✅ '+d.message+'</span>';
+      // Afficher tables + schemas
+      let html='<div style="margin-top:.75rem;display:grid;grid-template-columns:1fr 1fr;gap:1rem">';
+      // Tables en DB
+      html+='<div><div style="font-weight:600;font-size:.8rem;color:#94a3b8;margin-bottom:.3rem">Tables en base ('+d.tables.length+')</div>';
+      if(d.tables.length>0){
+        html+='<div style="display:flex;flex-wrap:wrap;gap:.3rem">';
+        for(const t of d.tables){
+          const isSchema=d.schemas.some(s=>s.collection===t);
+          html+='<span style="font-size:.75rem;padding:2px 6px;border-radius:3px;background:'+(isSchema?'#166534':'#1e293b')+';color:'+(isSchema?'#4ade80':'#94a3b8')+'">'+t+'</span>';
+        }
+        html+='</div>';
+      }else{
+        html+='<span style="font-size:.8rem;color:#64748b">Aucune table</span>';
+      }
+      html+='</div>';
+      // Schemas enregistrés
+      html+='<div><div style="font-weight:600;font-size:.8rem;color:#94a3b8;margin-bottom:.3rem">Schemas enregistrés ('+d.schemas.length+')</div>';
+      if(d.schemas.length>0){
+        html+='<div style="display:flex;flex-wrap:wrap;gap:.3rem">';
+        for(const s of d.schemas){
+          const inDb=d.tables.includes(s.collection);
+          html+='<span style="font-size:.75rem;padding:2px 6px;border-radius:3px;background:'+(inDb?'#1e3a5f':'#2d1b00')+';color:'+(inDb?'#60a5fa':'#fbbf24')+'" title="'+s.collection+' ('+s.fields+' champs, '+s.relations+' relations)">'+s.name+'</span>';
+        }
+        html+='</div>';
+      }else{
+        html+='<span style="font-size:.8rem;color:#64748b">Aucun schema</span>';
+      }
+      html+='</div></div>';
+      // Légende
+      html+='<div style="margin-top:.5rem;font-size:.7rem;color:#64748b">🟢 Table + Schema &nbsp; 🔵 Schema avec table &nbsp; 🟡 Schema sans table &nbsp; ⚪ Table hors schema</div>';
+      document.getElementById('dbTestDetail').innerHTML=html;
+    }else{
+      el.innerHTML='<span style="color:#ef4444">❌ '+d.message+'</span>';
+      document.getElementById('dbTestDetail').innerHTML='';
+    }
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>';document.getElementById('dbTestDetail').innerHTML='';}
 }
 async function doCreateDb(){
   const el=document.getElementById('dbStatus');
@@ -1385,6 +1627,126 @@ async function doApplySchema(){
     const d=await r.json();
     if(d.ok){
       el.innerHTML='<span style="color:#22c55e">✅ '+d.message+'</span>';
+    }else{
+      el.innerHTML='<span style="color:#ef4444">❌ '+(d.error||'Erreur')+'</span>';
+    }
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+}
+const DIALECT_DEFAULTS = {
+  sqlite:      { uri: './data/app.db',                                          port: '',    hint: 'Chemin vers le fichier SQLite' },
+  postgres:    { uri: 'postgresql://devuser:devpass26@localhost:5432/mydb',      port: '5432', hint: 'postgresql://user:pass@host:port/dbname' },
+  mysql:       { uri: 'mysql://devuser:devpass26@localhost:3306/mydb',           port: '3306', hint: 'mysql://user:pass@host:port/dbname' },
+  mariadb:     { uri: 'mariadb://devuser:devpass26@localhost:3306/mydb',         port: '3306', hint: 'mariadb://user:pass@host:port/dbname' },
+  mongodb:     { uri: 'mongodb://devuser:devpass26@localhost:27017/mydb?authSource=admin', port: '27017', hint: 'mongodb://user:pass@host:port/dbname' },
+  oracle:      { uri: 'oracle://devuser:devpass26@localhost:1521/XEPDB1',       port: '1521', hint: 'oracle://user:pass@host:port/SID' },
+  mssql:       { uri: 'mssql://devuser:devpass26@localhost:1433/mydb',          port: '1433', hint: 'mssql://user:pass@host:port/dbname' },
+  cockroachdb: { uri: 'postgresql://devuser:devpass26@localhost:26257/mydb',     port: '26257', hint: 'postgresql://user:pass@host:port/dbname' },
+  db2:         { uri: 'db2://devuser:devpass26@localhost:50000/mydb',            port: '50000', hint: 'db2://user:pass@host:port/dbname' },
+  hana:        { uri: 'hana://devuser:devpass26@localhost:30015',               port: '30015', hint: 'hana://user:pass@host:port' },
+  hsqldb:      { uri: 'hsqldb:hsql://localhost:9001/mydb',                      port: '9001', hint: 'hsqldb:hsql://host:port/dbname (JDBC)' },
+  spanner:     { uri: 'spanner://project/instance/mydb',                        port: '',    hint: 'spanner://project/instance/dbname' },
+  sybase:      { uri: 'sybase://devuser:devpass26@localhost:5000/mydb',         port: '5000', hint: 'sybase://user:pass@host:port/dbname (JDBC)' },
+};
+function onDialectChange(){
+  const sel=document.getElementById('dialectSelect');
+  const uri=document.getElementById('dialectUri');
+  const hint=document.getElementById('dialectHint');
+  const label=document.getElementById('dialectLabel');
+  const d=DIALECT_DEFAULTS[sel.value];
+  if(d){
+    uri.value=d.uri;
+    uri.placeholder=d.hint;
+    hint.textContent='Format: '+d.hint+(d.port?' — Port par défaut: '+d.port:'');
+    label.textContent=sel.value==='sqlite'?'SQLite (fichier local)':sel.value==='hsqldb'||sel.value==='sybase'?'JDBC Bridge requis':'';
+  }
+  document.getElementById('dialectStatus').textContent='';
+}
+// Init hint on load
+setTimeout(()=>{const s=document.getElementById('dialectSelect');if(s){const h=document.getElementById('dialectHint');const d=DIALECT_DEFAULTS[s.value];if(d&&h)h.textContent='Format: '+d.hint+(d.port?' — Port par défaut: '+d.port:'');}},100);
+
+async function doChangeDialect(){
+  const sel=document.getElementById('dialectSelect');
+  const uri=document.getElementById('dialectUri');
+  const el=document.getElementById('dialectStatus');
+  if(!sel.value||!uri.value){el.innerHTML='<span style="color:#ef4444">Dialecte et URI requis</span>';return}
+
+  // D'abord sauver la config sans connecter
+  el.textContent='Sauvegarde config...';
+  try{
+    const r=await fetch(BASE+'/api/change-dialect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dialect:sel.value,uri:uri.value,connect:false})});
+    const d=await r.json();
+    if(!d.ok){el.innerHTML='<span style="color:#ef4444">❌ '+(d.error||'Erreur')+'</span>';return}
+
+    el.innerHTML='<span style="color:#22c55e">✅ Config sauvée : '+sel.value+'</span>';
+
+    // Proposer de se connecter (nécessite redémarrage)
+    if(confirm('Config sauvée.\\n\\nRedémarrer le serveur pour se connecter à '+sel.value+' ?')){
+      el.innerHTML='<span style="color:#f59e0b">🔄 Redémarrage du serveur en cours...</span>';
+      // Demander le restart
+      try{await fetch(BASE+'/api/restart',{method:'POST'})}catch{}
+      // Attendre le retour du serveur
+      await waitForServer(el);
+    }
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+}
+async function waitForServer(statusEl){
+  statusEl.innerHTML='<span style="color:#f59e0b">⏳ En attente du redémarrage du serveur...</span>';
+  let attempts=0;
+  const maxAttempts=30;
+  while(attempts<maxAttempts){
+    await new Promise(r=>setTimeout(r,1500));
+    attempts++;
+    statusEl.innerHTML='<span style="color:#f59e0b">⏳ En attente... ('+attempts+'/'+maxAttempts+')</span>';
+    try{
+      const r=await fetch(BASE+'/health');
+      if(r.ok){
+        statusEl.innerHTML='<span style="color:#22c55e">✅ Serveur redémarré</span>';
+        setTimeout(()=>location.reload(),1000);
+        return;
+      }
+    }catch{}
+  }
+  statusEl.innerHTML='<span style="color:#ef4444">❌ Timeout — le serveur ne répond pas. Vérifiez le terminal.</span>';
+}
+async function doUnloadSchemas(){
+  if(!confirm('Décharger les schemas de la mémoire ?\\nLe fichier schemas.json sera supprimé.\\nLes tables en base ne sont PAS supprimées.'))return;
+  const el=document.getElementById('dbStatus');
+  el.textContent='Déchargement...';
+  try{
+    const r=await fetch(BASE+'/api/unload-schemas',{method:'POST'});
+    const d=await r.json();
+    if(d.ok){
+      el.innerHTML='<span style="color:#f59e0b">'+d.message+'</span>';
+      setTimeout(()=>location.reload(),1500);
+    }else{
+      el.innerHTML='<span style="color:#ef4444">❌ '+(d.error||'Erreur')+'</span>';
+    }
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+}
+async function doTruncate(){
+  if(!confirm('Vider toutes les tables ?\\nLes structures sont conservées, seules les données sont supprimées.'))return;
+  const el=document.getElementById('dbStatus');
+  el.textContent='Vidage des tables...';
+  try{
+    const r=await fetch(BASE+'/api/truncate-tables',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
+    const d=await r.json();
+    if(d.ok){
+      el.innerHTML='<span style="color:#f59e0b">⚠️ '+d.message+'</span>';
+    }else{
+      el.innerHTML='<span style="color:#ef4444">❌ '+(d.error||'Erreur')+'</span>';
+    }
+  }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
+}
+async function doDropTables(){
+  if(!confirm('⚠️ DANGER : Cela va SUPPRIMER toutes les tables de la base de données.\\n\\nCette action est IRREVERSIBLE.\\n\\nContinuer ?'))return;
+  if(!confirm('Êtes-vous VRAIMENT sûr ? Toutes les données seront perdues.'))return;
+  const el=document.getElementById('dbStatus');
+  el.textContent='Suppression des tables...';
+  try{
+    const r=await fetch(BASE+'/api/drop-tables',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
+    const d=await r.json();
+    if(d.ok){
+      el.innerHTML='<span style="color:#ef4444">⚠️ '+d.message+'</span>';
     }else{
       el.innerHTML='<span style="color:#ef4444">❌ '+(d.error||'Erreur')+'</span>';
     }
