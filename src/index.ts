@@ -43,6 +43,9 @@ export {
 export type { Subscription, ApiKeysFile } from './auth/apikeys.js';
 export { apiKeyMiddleware } from './auth/apikey-middleware.js';
 
+// Schema loader
+export { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip } from './lib/schema-loader.js';
+
 // Server
 export { startServer } from './server.js';
 export type { NetServer } from './server.js';

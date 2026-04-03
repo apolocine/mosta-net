@@ -1,20 +1,26 @@
 {
   "name": "@mostajs/net",
-  "version": "1.0.0-alpha.1",
+  "version": "2.0.41",
   "description": "Multi-protocol transport layer for @mostajs/orm — expose entities via REST, gRPC, GraphQL, WebSocket, SSE, tRPC, MCP, OData, Arrow Flight, JSON-RPC, NATS",
   "author": "Dr Hamid MADANI <drmdh@msn.com>",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "mostajs-net": "dist/cli.js"
+    "mostajs-net": "dist/cli.js",
+    "octonet-mcp": "dist/mcp-cli.js"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js",
+      "default": "./dist/client.js"
     }
   },
   "scripts": {
@@ -23,23 +29,29 @@
     "start": "node dist/cli.js serve"
   },
   "peerDependencies": {
-    "@mostajs/orm": ">=1.4.17"
+    "@mostajs/mproject": ">=1.0.0",
+    "@mostajs/orm": ">=1.7.7"
   },
   "dependencies": {
+    "@fastify/cors": "^11.2.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "@types/ws": "^8.18.1",
     "fastify": "^5.3.3",
     "graphql": "^16.13.1",
     "mercurius": "^16.8.0",
+    "mongoose": "^9.3.3",
+    "nats": "^2.29.3",
+    "pg": "^8.20.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.7.0"
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "server.json"
   ],
   "keywords": [
     "orm",
@@ -56,5 +68,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/apolocine/mosta-net"
-  }
+  },
+  "mcpName": "io.github.apolocine/mosta-net"
 }

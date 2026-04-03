@@ -100,7 +100,7 @@ export class JsonRpcTransport implements ITransport {
     const op = parts[1];
     const params = (req.params || {}) as Record<string, unknown>;
 
-    // Build OrmRequest
+    // Build OrmRequest (pass-through all known fields)
     const ormReq: OrmRequest = {
       op: op as OrmRequest['op'],
       entity: entityName,
@@ -112,6 +112,9 @@ export class JsonRpcTransport implements ITransport {
       query: params.query as string | undefined,
       searchFields: params.searchFields as string[] | undefined,
       stages: params.stages as any,
+      field: params.field as string | undefined,
+      value: params.value,
+      amount: params.amount as number | undefined,
     };
 
     if (!this.ormHandler) {
@@ -143,7 +146,11 @@ export class JsonRpcTransport implements ITransport {
    */
   listMethods(): string[] {
     const methods: string[] = [];
-    const ops = ['findAll', 'findOne', 'findById', 'create', 'update', 'delete', 'count', 'search'];
+    const ops = [
+      'findAll', 'findOne', 'findById', 'create', 'update', 'delete',
+      'deleteMany', 'count', 'search', 'aggregate', 'upsert',
+      'updateMany', 'addToSet', 'pull', 'increment',
+    ];
     for (const schema of this.schemas) {
       for (const op of ops) {
         methods.push(`${schema.name}.${op}`);
