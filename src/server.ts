@@ -595,8 +595,10 @@ ${C.cyan}└──────────────────────�
       if (dialect) {
         await dialect.initSchema(getAllSchemas());
       }
-      // Save schemas.json for next startup
+      // Save schemas/default.json + schemas.json (backward compat)
       const fs = await import('fs');
+      if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
+      fs.writeFileSync('schemas/default.json', JSON.stringify(body.schemas, null, 2));
       fs.writeFileSync('schemas.json', JSON.stringify(body.schemas, null, 2));
       // Schemas sauvés + tables créées — redémarrage pour enregistrer les routes
       // Délai 2s pour laisser la réponse HTTP arriver au client avant exit
@@ -1329,7 +1331,13 @@ ${C.cyan}└──────────────────────�
         if (projectDialect) {
           await projectDialect.initSchema(body.schemas);
         }
-        return { ok: true, count: body.schemas.length, schemas: body.schemas.map((s: any) => s.name) };
+        // Save schemas/{projectName}.json
+        const fs = await import('fs');
+        if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
+        const fileName = 'schemas/' + project + '.json';
+        fs.writeFileSync(fileName, JSON.stringify(body.schemas, null, 2));
+        console.log(`  schemas ${project}: ${body.schemas.length} schemas saved to ${fileName}`);
+        return { ok: true, count: body.schemas.length, file: fileName, schemas: body.schemas.map((s: any) => s.name) };
       } catch (e: unknown) {
         return { ok: false, error: e instanceof Error ? e.message : 'Upload failed' };
       }
