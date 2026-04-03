@@ -1254,10 +1254,52 @@ ${C.cyan}└──────────────────────�
     const fullUrl = req.url as string;
     const subpath = fullUrl.substring(('/' + project).length);
 
-    // Health: /:project/health
+    // Health: /:project/health — NetHealthResponse format for @mostajs/setup
     if (subpath === '/health') {
-      const schemasCount = Array.isArray(projectInfo.schemas) ? projectInfo.schemas.length : 0;
-      return { status: 'ok', project, schemas: schemasCount };
+      const projectSchemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
+      const enabledTransportNames = Object.entries(process.env)
+        .filter(([k, v]) => k.startsWith('MOSTA_NET_') && k.endsWith('_ENABLED') && v === 'true')
+        .map(([k]) => k.replace('MOSTA_NET_', '').replace('_ENABLED', '').toLowerCase());
+      return {
+        status: 'ok',
+        project,
+        transports: enabledTransportNames,
+        entities: projectSchemas.map((s: EntitySchema) => s.name),
+      };
+    }
+
+    // API: /:project/api/test-connection
+    if (subpath === '/api/test-connection') {
+      const projectDialect = projectInfo.dialect;
+      if (!projectDialect) return { ok: false, message: 'Project not connected: ' + project };
+      try {
+        return { ok: true, message: 'Connected to ' + project };
+      } catch (e: unknown) {
+        return { ok: false, message: e instanceof Error ? e.message : 'Connection failed' };
+      }
+    }
+
+    // API: /:project/api/schemas-config
+    if (subpath === '/api/schemas-config') {
+      const projectSchemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
+      return {
+        schemasJsonExists: projectSchemas.length > 0,
+        schemaCount: projectSchemas.length,
+        schemas: projectSchemas.map((s: EntitySchema) => ({ name: s.name, collection: s.collection })),
+      };
+    }
+
+    // API: /:project/api/apply-schema
+    if (subpath === '/api/apply-schema' && req.method === 'POST') {
+      const projectDialect = projectInfo.dialect;
+      if (!projectDialect) return { ok: false, message: 'Project not connected' };
+      const projectSchemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
+      try {
+        await projectDialect.initSchema(projectSchemas);
+        return { ok: true, message: projectSchemas.length + ' schemas applied', tables: projectSchemas.map((s: EntitySchema) => s.collection) };
+      } catch (e: unknown) {
+        return { ok: false, message: e instanceof Error ? e.message : 'Schema apply failed' };
+      }
     }
 
     // REST: /:project/api/v1/:collection[/:id]
