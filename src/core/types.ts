@@ -55,8 +55,8 @@ export interface TransportContext {
   subscription?: string;
   /** Resolved permissions for this request */
   permissions?: Record<string, string>;
-  /** Project identifier for multi-project routing (resolved from path or header) */
-  projectId?: string;
+  /** Project name for multi-project routing (resolved from path or header) — unique name, not a numeric ID */
+  projectName?: string;
   /** Extra metadata per transport */
   meta?: Record<string, unknown>;
 }

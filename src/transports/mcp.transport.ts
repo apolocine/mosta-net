@@ -106,10 +106,10 @@ export class McpTransport implements ITransport {
   // Tool registration (CRUD operations per entity)
   // ============================================================
 
-  private registerEntityToolsOn(server: McpServer, schema: EntitySchema, projectId?: string): void {
+  private registerEntityToolsOn(server: McpServer, schema: EntitySchema, projectName?: string): void {
     const name = schema.name;
-    const prefix = projectId ? `${projectId}_` : '';
-    const toolProjectId = projectId; // Captured for closure
+    const prefix = projectName ? `${projectName}_` : '';
+    const toolProjectId = projectName; // Captured for closure
 
     // Tool: {Entity}_findAll — query entities
     server.registerTool(
@@ -504,11 +504,11 @@ export class McpTransport implements ITransport {
 
   // ============================================================
 
-  private async callOrm(projectId: string | undefined, req: OrmRequest): Promise<OrmResponse> {
+  private async callOrm(projectName: string | undefined, req: OrmRequest): Promise<OrmResponse> {
     if (!this.ormHandler) {
       return { status: 'error', error: { code: 'NO_HANDLER', message: 'ORM handler not initialized' } };
     }
-    const ctx: TransportContext = { transport: this.name, projectId };
+    const ctx: TransportContext = { transport: this.name, projectName };
 
     // Apply middleware chain (auth, RBAC, logging, etc.)
     if (this.middlewares.length > 0) {
@@ -575,7 +575,7 @@ export class McpTransport implements ITransport {
   async executeTool(toolName: string, params: Record<string, any>): Promise<any> {
     // Parse tool name: [project_]entity_operation
     const parts = toolName.split('_');
-    let projectId: string | undefined;
+    let projectName: string | undefined;
     let entity: string;
     let op: string;
 
@@ -583,7 +583,7 @@ export class McpTransport implements ITransport {
       // Check if first part is a project
       const projects = this.projectsProvider ? this.projectsProvider() : [];
       if (projects.some(p => p.name === parts[0])) {
-        projectId = parts[0];
+        projectName = parts[0];
         entity = parts[1];
         op = parts.slice(2).join('_');
       } else {
@@ -610,7 +610,7 @@ export class McpTransport implements ITransport {
     if (params.stages) req.stages = typeof params.stages === 'string' ? JSON.parse(params.stages) : params.stages;
 
     this.stats.requests++;
-    const res = await this.callOrm(projectId, req);
+    const res = await this.callOrm(projectName, req);
     return res;
   }
 }

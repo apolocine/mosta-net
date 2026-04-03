@@ -21,7 +21,6 @@ import { JsonRpcTransport } from './transports/jsonrpc.transport.js';
 import { McpTransport } from './transports/mcp.transport.js';
 import { TrpcTransport } from './transports/trpc.transport.js';
 import { ODataTransport } from './transports/odata.transport.js';
-import { getHelpTabHtml, getHelpTabScript } from './views/help.js';
 import { GrpcTransport } from './transports/grpc.transport.js';
 import { NatsTransport } from './transports/nats.transport.js';
 import { ArrowFlightTransport } from './transports/arrow.transport.js';
@@ -250,9 +249,9 @@ ${C.cyan}└──────────────────────�
   // 6. ORM handler — context-aware via ProjectManager
   const ormHandler = async (req: OrmRequest, ctx: TransportContext): Promise<OrmResponse> => {
     // Resolve the right EntityService for this project
-    const es = pm.resolveEntityService(ctx.projectName);
+    const es = pm.resolveEntityService(ctx.projectId);
     if (!es) {
-      const projectMsg = ctx.projectName ? `Projet "${ctx.projectName}" non trouvé` : 'Base de donnees non connectee';
+      const projectMsg = ctx.projectId ? `Projet "${ctx.projectId}" non trouvé` : 'Base de donnees non connectee';
       return { status: 'error', data: null, error: { code: 'DB_NOT_CONNECTED', message: projectMsg + ': ' + (dbError || 'configurez DB_DIALECT + SGBD_URI') } };
     }
     return es.execute(req);
@@ -1180,123 +1179,7 @@ ${C.cyan}└──────────────────────�
     } catch { reply.status(404); return 'Logo not found'; }
   });
 
-  // 8g. Project namespace routing — /:project/*
-  const RESERVED_NAMES = new Set(['api','mcp','graphql','ws','events','rpc','trpc','odata','health','_admin','arrow','nats','default','logo.png']);
-
-  // Helper: handle REST for a specific project
-  async function handleProjectRest(projectName: string, collection: string, req: any, reply: any) {
-    const projectInfo = pm.getProject(projectName);
-    if (!projectInfo) return reply.code(404).send({ error: 'Project not found: ' + projectName });
-    const projectDialect = projectInfo.dialect;
-    if (!projectDialect) return reply.code(503).send({ error: 'Project not connected: ' + projectName });
-    const schema = (projectInfo.schemas || []).find((s: EntitySchema) => s.collection === collection || s.name.toLowerCase() === collection.toLowerCase());
-    if (!schema) return reply.code(404).send({ error: 'Collection not found: ' + collection + ' in project ' + projectName });
-
-    const method = req.method.toUpperCase();
-    const url = req.url as string;
-    const parts = url.split('/').filter(Boolean);
-    // Extract ID if present: /:project/api/v1/:collection/:id
-    const collIdx = parts.indexOf(collection);
-    const id = parts[collIdx + 1] || null;
-    const body = req.body as Record<string, unknown> | undefined;
-
-    const ormReq: OrmRequest = { entity: schema.name, op: 'findAll' };
-    if (method === 'GET' && !id) { ormReq.op = 'findAll'; }
-    else if (method === 'GET' && id === 'count') { ormReq.op = 'count'; }
-    else if (method === 'GET' && id) { ormReq.op = 'findById'; ormReq.id = id; }
-    else if (method === 'POST') { ormReq.op = 'create'; ormReq.data = body; }
-    else if (method === 'PUT' && id) { ormReq.op = 'update'; ormReq.id = id; ormReq.data = body; }
-    else if (method === 'DELETE' && id) { ormReq.op = 'delete'; ormReq.id = id; }
-
-    const ctx: TransportContext = { transport: 'rest', projectName };
-    try {
-      const result = await ormHandler(ormReq, ctx);
-      return result;
-    } catch (e: unknown) {
-      return reply.code(500).send({ error: e instanceof Error ? e.message : 'Internal error' });
-    }
-  }
-
-  // Helper: handle MCP for a specific project (tools non-prefixed, scoped to project)
-  async function handleProjectMcp(projectName: string, req: any, reply: any) {
-    const projectInfo = pm.getProject(projectName);
-    if (!projectInfo) return reply.code(404).send({ error: 'Project not found: ' + projectName });
-    const projectSchemas = projectInfo.schemas || [];
-    if (!projectSchemas.length) return reply.code(404).send({ error: 'No schemas for project: ' + projectName });
-
-    // Create a dedicated MCP transport for this project (tools non-prefixed)
-    const projectMcp = new McpTransport();
-    projectMcp.setHandler(async (ormReq, ctx) => {
-      ctx.projectName = projectName;
-      return ormHandler(ormReq, ctx);
-    });
-    for (const s of projectSchemas) projectMcp.registerEntity(s);
-    await projectMcp.start({ enabled: true, port: 0, path: '/' + projectName + '/mcp' });
-
-    reply.type('text/event-stream');
-    const rawReq = req.raw;
-    const rawRes = reply.raw;
-    rawRes.setHeader('Content-Type', 'text/event-stream');
-    rawRes.setHeader('Cache-Control', 'no-cache');
-    rawRes.setHeader('Access-Control-Allow-Origin', '*');
-    rawRes.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, mcp-session-id');
-    await projectMcp.handleRequest(rawReq, rawRes, req.body);
-  }
-
-  // Catch-all route: /:project/...
-  app.all('/:project/*', async (req, reply) => {
-    const project = (req.params as any).project as string;
-    if (RESERVED_NAMES.has(project)) return; // Let Fastify handle normally
-
-    const projectInfo = pm.getProject(project);
-    if (!projectInfo) return reply.code(404).send({ error: 'Project not found: ' + project });
-
-    const fullUrl = req.url as string;
-    const subpath = fullUrl.substring(('/' + project).length);
-
-    // REST: /:project/api/v1/:collection[/:id]
-    if (subpath.startsWith('/api/v1/')) {
-      const rest = subpath.replace('/api/v1/', '');
-      const collection = rest.split('/')[0];
-      return handleProjectRest(project, collection, req, reply);
-    }
-
-    // MCP: /:project/mcp
-    if (subpath === '/mcp' || subpath.startsWith('/mcp')) {
-      return handleProjectMcp(project, req, reply);
-    }
-
-    // GraphQL: /:project/graphql — forward to main graphql with project header
-    if (subpath === '/graphql' || subpath.startsWith('/graphql')) {
-      req.headers['x-project'] = project;
-      return reply.redirect('/graphql');
-    }
-
-    // Dashboard: /:project/ — show project info
-    if (subpath === '/' || subpath === '') {
-      reply.type('text/html');
-      return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${project} — OctoNet</title>
-        <style>body{font-family:sans-serif;background:#0f172a;color:#e2e8f0;padding:2rem;max-width:800px;margin:0 auto}
-        h1{color:#38bdf8}a{color:#38bdf8}code{background:#1e293b;padding:.1rem .3rem;border-radius:3px;font-size:.85rem}
-        .card{background:#1e293b;border-radius:8px;padding:1rem;margin:.5rem 0}pre{background:#0f172a;padding:.75rem;border-radius:6px;font-size:.8rem;overflow:auto}</style></head><body>
-        <h1>${project}</h1>
-        <p style="color:#94a3b8">${projectInfo.dialect} — ${(projectInfo.schemas||[]).length} schemas</p>
-        <div class="card"><h3 style="color:#38bdf8;margin-top:0">Endpoints</h3>
-        <ul style="line-height:2">${(projectInfo.schemas||[]).map((s: EntitySchema) =>
-          '<li><a href="/' + project + '/api/v1/' + s.collection + '">/' + project + '/api/v1/' + s.collection + '</a> (' + s.name + ')</li>'
-        ).join('')}
-        <li><a href="/${project}/mcp">/${project}/mcp</a> (MCP)</li>
-        </ul></div>
-        <div class="card"><h3 style="color:#38bdf8;margin-top:0">Claude Desktop</h3>
-        <pre>{"mcpServers":{"${project}":{"url":"${req.protocol}://${req.hostname}/${project}/mcp"}}}</pre></div>
-        <p><a href="/">← Retour au dashboard</a></p>
-        </body></html>`;
-    }
-
-    return reply.code(404).send({ error: 'Unknown endpoint: ' + subpath + ' for project ' + project });
-  });
-
-  // 8h. Home page — net dashboard
+  // 8g. Home page — net dashboard
   app.get('/', async (req, reply) => {
     reply.type('text/html');
     // Lire les valeurs actuelles (pas celles du démarrage)
@@ -1367,27 +1250,27 @@ function registerDynamicRestRoutes(
   const prefix = '/api/v1';
 
   /** Resolve project + collection from params, checking if first param is a project name */
-  const resolveProjectAndCollection = (params: { col: string; sub?: string }, headers: Record<string, string>): { projectName?: string; col: string } => {
+  const resolveProjectAndCollection = (params: { col: string; sub?: string }, headers: Record<string, string>): { projectId?: string; col: string } => {
     // Priority 1: Header X-Project
     const headerProject = headers['x-project'];
     if (headerProject && pm.hasProject(headerProject)) {
-      return { projectName: headerProject, col: params.col };
+      return { projectId: headerProject, col: params.col };
     }
 
     // Priority 2: Path prefix — if params.sub exists, col is the project, sub is the collection
     if (params.sub) {
-      return { projectName: params.col, col: params.sub };
+      return { projectId: params.col, col: params.sub };
     }
 
     // Priority 3: Check if params.col is actually a project name (for /api/v1/:project/:col pattern)
     // Only if it's NOT a known collection
-    return { projectName: undefined, col: params.col };
+    return { projectId: undefined, col: params.col };
   };
 
-  const handle = async (ormReq: OrmRequest, reply: any, projectName?: string, req?: any) => {
-    // Resolve projectName from header if not provided via path
-    const resolvedProjectId = projectName || req?.headers?.['x-project'] || undefined;
-    const ctx: TransportContext = { transport: 'rest', projectName: resolvedProjectId };
+  const handle = async (ormReq: OrmRequest, reply: any, projectId?: string, req?: any) => {
+    // Resolve projectId from header if not provided via path
+    const resolvedProjectId = projectId || req?.headers?.['x-project'] || undefined;
+    const ctx: TransportContext = { transport: 'rest', projectId: resolvedProjectId };
     const res = await ormHandler(ormReq, ctx);
     if (res.status === 'error') {
       reply.status(res.error?.code === 'ENTITY_NOT_FOUND' || res.error?.code === 'EntityNotFoundError' ? 404 :
@@ -1399,10 +1282,10 @@ function registerDynamicRestRoutes(
   };
 
   /** Resolve collection name → entity name. Checks project schemas first, then global registry */
-  const resolveEntity = (collection: string, projectName?: string): string | null => {
-    // If projectName specified, check that project's schemas first
-    if (projectName) {
-      const project = pm.getProject(projectName);
+  const resolveEntity = (collection: string, projectId?: string): string | null => {
+    // If projectId specified, check that project's schemas first
+    if (projectId) {
+      const project = pm.getProject(projectId);
       if (project) {
         const schema = project.schemas.find(s => s.collection === collection || s.name === collection);
         if (schema) return schema.name;
@@ -1419,16 +1302,16 @@ function registerDynamicRestRoutes(
 
   /**
    * If first param is a known project name, shift params:
-   *   /api/v1/project-b/users     → { projectName: 'project-b', col: 'users', id: undefined }
-   *   /api/v1/project-b/users/123 → { projectName: 'project-b', col: 'users', id: '123' }
-   *   /api/v1/users               → { projectName: undefined, col: 'users', id: undefined }
-   *   /api/v1/users/123           → { projectName: undefined, col: 'users', id: '123' }
+   *   /api/v1/project-b/users     → { projectId: 'project-b', col: 'users', id: undefined }
+   *   /api/v1/project-b/users/123 → { projectId: 'project-b', col: 'users', id: '123' }
+   *   /api/v1/users               → { projectId: undefined, col: 'users', id: undefined }
+   *   /api/v1/users/123           → { projectId: undefined, col: 'users', id: '123' }
    * Also supports X-Project header as override.
    */
-  const resolveParams = (col: string, id: string | undefined, headers: Record<string, string>): { projectName?: string; col: string; id?: string } => {
+  const resolveParams = (col: string, id: string | undefined, headers: Record<string, string>): { projectId?: string; col: string; id?: string } => {
     const headerProject = headers['x-project'];
-    if (headerProject) return { projectName: headerProject, col, id };
-    if (pm.hasProject(col)) return { projectName: col, col: id || '', id: undefined };
+    if (headerProject) return { projectId: headerProject, col, id };
+    if (pm.hasProject(col)) return { projectId: col, col: id || '', id: undefined };
     return { col, id };
   };
 
@@ -1456,9 +1339,9 @@ function registerDynamicRestRoutes(
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     // If col was a project → create on that project's collection
-    if (r.projectName && !r.id) {
-      const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
-      const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, r.projectName);
+    if (r.projectId && !r.id) {
+      const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
+      const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, r.projectId);
       if (reply.statusCode < 400) reply.status(201);
       return res;
     }
@@ -1527,54 +1410,54 @@ function registerDynamicRestRoutes(
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     // If col was a project → r.col is the collection, r.id is undefined → findAll on that project
-    if (r.projectName && !r.id) {
-      const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
+    if (r.projectId && !r.id) {
+      const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
       const q = req.query as Record<string, string>;
       const { options, relations } = parseOpts(q);
-      return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, r.projectName);
+      return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, r.projectId);
     }
-    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
+    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
     const q = req.query as Record<string, string>;
     const { options, relations } = parseOpts(q);
-    return handle({ op: 'findById', entity, id: r.id!, options, relations }, reply, r.projectName);
+    return handle({ op: 'findById', entity, id: r.id!, options, relations }, reply, r.projectId);
   });
 
   app.put(`${prefix}/:col/:id`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
-    return handle({ op: 'update', entity, id: r.id!, data: req.body as Record<string, unknown> }, reply, r.projectName);
+    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
+    return handle({ op: 'update', entity, id: r.id!, data: req.body as Record<string, unknown> }, reply, r.projectId);
   });
 
   app.delete(`${prefix}/:col/:id`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
-    return handle({ op: 'delete', entity, id: r.id!, }, reply, r.projectName);
+    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
+    return handle({ op: 'delete', entity, id: r.id!, }, reply, r.projectId);
   });
 
   app.post(`${prefix}/:col/:id/addToSet`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
+    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
     const { field, value } = req.body as { field: string; value: unknown };
-    return handle({ op: 'addToSet', entity, id: r.id!, field, value }, reply, r.projectName);
+    return handle({ op: 'addToSet', entity, id: r.id!, field, value }, reply, r.projectId);
   });
 
   app.post(`${prefix}/:col/:id/pull`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
+    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
     const { field, value } = req.body as { field: string; value: unknown };
-    return handle({ op: 'pull', entity, id: r.id!, field, value }, reply, r.projectName);
+    return handle({ op: 'pull', entity, id: r.id!, field, value }, reply, r.projectId);
   });
 
   app.post(`${prefix}/:col/:id/increment`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
+    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
     const { field, amount } = req.body as { field: string; amount: number };
-    return handle({ op: 'increment', entity, id: r.id!, field, amount }, reply, r.projectName);
+    return handle({ op: 'increment', entity, id: r.id!, field, amount }, reply, r.projectId);
   });
 
   // ── Collection-level routes (also handles /api/v1/:project/:col via /:col/:id) ──
@@ -1587,18 +1470,18 @@ function registerDynamicRestRoutes(
       const project = pm.getProject(rawCol);
       return { project: rawCol, schemas: project?.schemas.map(s => s.name), status: project?.status };
     }
-    const projectName = h['x-project'] || undefined;
+    const projectId = h['x-project'] || undefined;
     const entity = resolveEntity(rawCol, (req.headers as any)['x-project']); if (!entity) return notFound(rawCol, reply);
     const q = req.query as Record<string, string>;
     const { options, relations } = parseOpts(q);
-    return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, projectName);
+    return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, projectId);
   });
 
   app.post(`${prefix}/:col`, async (req, reply) => {
     const { col: rawCol } = req.params as { col: string };
-    const projectName = (req.headers as Record<string, string>)['x-project'] || undefined;
+    const projectId = (req.headers as Record<string, string>)['x-project'] || undefined;
     const entity = resolveEntity(rawCol, (req.headers as any)['x-project']); if (!entity) return notFound(rawCol, reply);
-    const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, projectName);
+    const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, projectId);
     if (reply.statusCode < 400) reply.status(201);
     return res;
   });
@@ -1806,7 +1689,6 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
     <button class="nav-tab" onclick="showTab('projects')">Projects</button>
     <button class="nav-tab" onclick="showTab('mcp')">MCP Agent</button>
     <button class="nav-tab" onclick="showTab('admin')">Admin</button>
-    <button class="nav-tab" onclick="showTab('help')" style="margin-left:auto">Help</button>
   </div>
 
   <!-- TAB: Dashboard -->
@@ -2204,10 +2086,6 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
   </div>
 
   </div><!-- /tab-admin -->
-
-  <!-- TAB: Help -->
-  ${getHelpTabHtml(port)}
-
 </div>
 
 <script>
@@ -3349,7 +3227,6 @@ async function doDropTables(){
     }
   }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
 }
-${getHelpTabScript()}
 </script>
 </body>
 </html>`;
