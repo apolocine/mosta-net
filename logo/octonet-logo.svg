@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="dbGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#22c55e"/>
+      <stop offset="100%" stop-color="#16a34a"/>
+    </linearGradient>
+    <linearGradient id="transGrad" x1="1" y1="0" x2="0" y2="0">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ea580c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="250" fill="#0f172a"/>
+  <circle cx="256" cy="256" r="240" fill="none" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Body — poulpe central (tete siamoise) -->
+  <ellipse cx="256" cy="200" rx="80" ry="70" fill="url(#bodyGrad)" opacity="0.9"/>
+
+  <!-- Yeux -->
+  <ellipse cx="232" cy="185" rx="18" ry="20" fill="white"/>
+  <ellipse cx="280" cy="185" rx="18" ry="20" fill="white"/>
+  <circle cx="235" cy="183" r="10" fill="#0f172a"/>
+  <circle cx="283" cy="183" r="10" fill="#0f172a"/>
+  <circle cx="238" cy="180" r="4" fill="white"/>
+  <circle cx="286" cy="180" r="4" fill="white"/>
+
+  <!-- Sourire -->
+  <path d="M 235 210 Q 256 225 277 210" fill="none" stroke="white" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- ═══ TENTACULES DROITE — 7 Dialectes SGBD (vert) ═══ -->
+
+  <!-- PostgreSQL -->
+  <path d="M 320 230 Q 370 220 420 180" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="425" cy="175" r="14" fill="#22c55e"/>
+  <text x="425" y="179" text-anchor="middle" font-size="10" font-weight="bold" fill="white">PG</text>
+
+  <!-- MongoDB -->
+  <path d="M 325 245 Q 380 245 430 225" fill="none" stroke="#16a34a" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="435" cy="220" r="14" fill="#16a34a"/>
+  <text x="435" y="224" text-anchor="middle" font-size="9" font-weight="bold" fill="white">MG</text>
+
+  <!-- MySQL -->
+  <path d="M 325 260 Q 385 270 440 265" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="445" cy="262" r="14" fill="#22c55e"/>
+  <text x="445" y="266" text-anchor="middle" font-size="9" font-weight="bold" fill="white">MY</text>
+
+  <!-- SQLite -->
+  <path d="M 320 275 Q 375 300 430 305" fill="none" stroke="#16a34a" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="435" cy="305" r="14" fill="#16a34a"/>
+  <text x="435" y="309" text-anchor="middle" font-size="9" font-weight="bold" fill="white">SL</text>
+
+  <!-- Oracle -->
+  <path d="M 310 290 Q 360 330 415 345" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="420" cy="345" r="14" fill="#22c55e"/>
+  <text x="420" y="349" text-anchor="middle" font-size="9" font-weight="bold" fill="white">OR</text>
+
+  <!-- MSSQL -->
+  <path d="M 295 300 Q 335 360 390 380" fill="none" stroke="#16a34a" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="395" cy="380" r="14" fill="#16a34a"/>
+  <text x="395" y="384" text-anchor="middle" font-size="9" font-weight="bold" fill="white">MS</text>
+
+  <!-- DB2 + more -->
+  <path d="M 275 305 Q 305 380 350 410" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-dasharray="6,4"/>
+  <text x="355" y="420" font-size="11" fill="#22c55e" font-weight="bold">+7</text>
+
+  <!-- ═══ TENTACULES GAUCHE — 6 Transports (orange) ═══ -->
+
+  <!-- REST -->
+  <path d="M 190 230 Q 140 220 90 180" fill="none" stroke="#f59e0b" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="85" cy="175" r="16" fill="#f59e0b"/>
+  <text x="85" y="179" text-anchor="middle" font-size="8" font-weight="bold" fill="white">REST</text>
+
+  <!-- GraphQL -->
+  <path d="M 185 245 Q 130 245 80 225" fill="none" stroke="#ea580c" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="75" cy="220" r="16" fill="#ea580c"/>
+  <text x="75" y="224" text-anchor="middle" font-size="7" font-weight="bold" fill="white">GQL</text>
+
+  <!-- MCP -->
+  <path d="M 185 260 Q 125 270 70 265" fill="none" stroke="#f59e0b" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="65" cy="262" r="16" fill="#f59e0b"/>
+  <text x="65" y="266" text-anchor="middle" font-size="8" font-weight="bold" fill="white">MCP</text>
+
+  <!-- gRPC -->
+  <path d="M 190 275 Q 135 300 80 305" fill="none" stroke="#ea580c" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="75" cy="305" r="16" fill="#ea580c"/>
+  <text x="75" y="309" text-anchor="middle" font-size="7" font-weight="bold" fill="white">gRPC</text>
+
+  <!-- OData -->
+  <path d="M 200 290 Q 150 330 95 345" fill="none" stroke="#f59e0b" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="90" cy="345" r="16" fill="#f59e0b"/>
+  <text x="90" y="349" text-anchor="middle" font-size="7" font-weight="bold" fill="white">OData</text>
+
+  <!-- WS + more -->
+  <path d="M 215 300 Q 175 360 130 385" fill="none" stroke="#ea580c" stroke-width="3" stroke-linecap="round" stroke-dasharray="6,4"/>
+  <text x="115" y="395" font-size="11" fill="#ea580c" font-weight="bold">+5</text>
+
+  <!-- ═══ Texte central ═══ -->
+  <text x="256" y="145" text-anchor="middle" font-size="18" font-weight="900" fill="white" font-family="Arial,sans-serif">OctoNet</text>
+  <text x="256" y="160" text-anchor="middle" font-size="10" fill="#94a3b8" font-family="Arial,sans-serif">MCP Server</text>
+
+  <!-- Badge "13 DBs × 11 Transports" -->
+  <rect x="170" y="440" rx="12" width="172" height="28" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="256" y="459" text-anchor="middle" font-size="12" font-weight="bold" fill="#38bdf8" font-family="Arial,sans-serif">13 DBs × 11 Transports</text>
+
+  <!-- Labels -->
+  <text x="430" y="145" text-anchor="middle" font-size="11" fill="#22c55e" font-weight="bold">SGBD</text>
+  <text x="80" y="145" text-anchor="middle" font-size="11" fill="#f59e0b" font-weight="bold">Transports</text>
+</svg>

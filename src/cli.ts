@@ -75,6 +75,68 @@ async function main() {
       break;
     }
 
+    case 'mcp': {
+      // MCP-only mode: npx mostajs-net mcp --dialect=X --uri=Y
+      // Or: npx octonet-mcp --dialect=X --uri=Y
+      const cliArgs = args.slice(1);
+      const getArg = (name: string) => {
+        const a = cliArgs.find(a => a.startsWith(`--${name}=`));
+        return a ? a.split('=').slice(1).join('=') : undefined;
+      };
+      const d = getArg('dialect') || process.env.DB_DIALECT;
+      const u = getArg('uri') || process.env.SGBD_URI;
+      const port = getArg('port') || process.env.MOSTA_NET_PORT || '4488';
+      const projects = getArg('projects') || process.env.MOSTA_PROJECTS;
+
+      if (!d || !u) {
+        console.log(`
+  \x1b[1mOctoNet MCP\x1b[0m — MCP server for 13 databases
+  ${'─'.repeat(45)}
+
+  Usage:
+    npx octonet-mcp --dialect=postgres --uri=postgresql://user:pass@host:5432/db
+    npx octonet-mcp --dialect=sqlite --uri=:memory:
+    npx octonet-mcp --dialect=mongodb --uri=mongodb://user:pass@host:27017/db
+    npx octonet-mcp --projects=./projects-tree.json
+
+  Options:
+    --dialect=<dialect>   Database dialect (postgres, mysql, sqlite, mongodb, oracle, mssql, db2, hana, hsqldb, sybase, cockroachdb, spanner)
+    --uri=<uri>           Connection string
+    --port=<port>         HTTP port (default: 4488)
+    --projects=<file>     Multi-project JSON config file
+
+  Environment variables:
+    DB_DIALECT, SGBD_URI, MOSTA_NET_PORT, MOSTA_PROJECTS
+`);
+        process.exit(1);
+      }
+
+      // Set env for the server
+      process.env.DB_DIALECT = d;
+      process.env.SGBD_URI = u;
+      process.env.MOSTA_NET_PORT = port;
+      process.env.MOSTA_NET_MCP_ENABLED = 'true';
+      process.env.MOSTA_NET_REST_ENABLED = 'true'; // REST for admin API
+      process.env.DB_SCHEMA_STRATEGY = getArg('strategy') || 'update';
+      if (projects) process.env.MOSTA_PROJECTS = projects;
+
+      console.log(`
+  \x1b[1mOctoNet MCP\x1b[0m — 1 server, 13 databases, zero config
+  ${'─'.repeat(50)}
+  Dialect:  \x1b[32m${d}\x1b[0m
+  URI:      \x1b[2m${u.replace(/:([^@]+)@/, ':***@')}\x1b[0m
+  Port:     \x1b[33m${port}\x1b[0m (MCP: /mcp, REST: /api/v1)
+  ${projects ? 'Projects: ' + projects : ''}
+`);
+
+      const { startServer } = await import('./server.js');
+      const server = await startServer();
+      const shutdown = async () => { await server.stop(); process.exit(0); };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+      break;
+    }
+
     case 'info': {
       const config = loadNetConfig();
       const enabled = getEnabledTransports(config);
