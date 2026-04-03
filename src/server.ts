@@ -149,7 +149,12 @@ ${C.cyan}└──────────────────────�
 
   // CORS — allow cross-origin requests (ornetadmin API Explorer, Studio, etc.)
   const cors = (await import('@fastify/cors')).default;
-  await app.register(cors, { origin: true });
+  await app.register(cors, {
+    origin: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-project', 'mcp-session-id', 'Accept'],
+    credentials: true,
+  });
 
   // 5c. Performance tracker + Rate limiter
   const perfStats = {
@@ -1300,6 +1305,29 @@ ${C.cyan}└──────────────────────�
       } catch (e: unknown) {
         return { ok: false, message: e instanceof Error ? e.message : 'Schema apply failed' };
       }
+    }
+
+    // API: /:project/api/upload-schemas-json
+    if (subpath === '/api/upload-schemas-json' && req.method === 'POST') {
+      const body = req.body as { schemas?: any[] };
+      if (!body?.schemas?.length) return { ok: false, error: 'No schemas provided' };
+      try {
+        // Update project with new schemas
+        await pm.updateProject(project, { schemas: body.schemas });
+        const projectDialect = pm.getProject(project)?.dialect;
+        if (projectDialect) {
+          await projectDialect.initSchema(body.schemas);
+        }
+        return { ok: true, count: body.schemas.length, schemas: body.schemas.map((s: any) => s.name) };
+      } catch (e: unknown) {
+        return { ok: false, error: e instanceof Error ? e.message : 'Upload failed' };
+      }
+    }
+
+    // API: /:project/api/create-database — forward to global endpoint with project context
+    if (subpath === '/api/create-database' && req.method === 'POST') {
+      // Project DB creation is handled at project add time by mproject
+      return { ok: true, message: 'Use the Projects tab to create/configure the database for ' + project };
     }
 
     // REST: /:project/api/v1/:collection[/:id]
