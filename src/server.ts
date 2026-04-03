@@ -939,7 +939,18 @@ ${C.cyan}└──────────────────────�
 
   // ── Multi-project API (/api/projects) ──
 
-  app.get('/api/projects', async () => pm.listProjects());
+  app.get('/api/projects', async () => {
+    const list = pm.listProjects();
+    // Enrich with uriMasked from ProjectContext
+    return list.map((p: any) => {
+      const ctx = pm.getProject(p.name);
+      return {
+        ...p,
+        uriMasked: ctx?.uriMasked || '',
+        dialectType: ctx?.dialectType || p.dialect,
+      };
+    });
+  });
 
   app.post('/api/projects', async (req, reply) => {
     const body = req.body as ProjectConfig;
@@ -2564,15 +2575,17 @@ async function editProject(name){
     const projects=await res.json();
     const p=projects.find(pr=>pr.name===name);
     if(!p)return alert('Projet non trouve');
-    // Open the form
+    // Open the form and fill all fields
     document.getElementById('addProjectForm').open=true;
     document.getElementById('pName').value=p.name;
     document.getElementById('pName').disabled=true;
-    document.getElementById('pDialect').value=p.dialect;
+    document.getElementById('pDialect').value=p.dialect||p.dialectType||'postgres';
     onPDialectChange();
-    // We don't have the raw URI — user must re-enter or keep
-    document.getElementById('pUri').placeholder='Entrez la nouvelle URI ou gardez l\\'actuelle';
-    document.getElementById('pSchemasJson').value=JSON.stringify(p.schemas||[]);
+    document.getElementById('pUri').value=p.uriMasked||'';
+    document.getElementById('pUri').placeholder=p.uriMasked||'Entrez l\\'URI de connexion';
+    document.getElementById('pDesc').value=p.description||'';
+    document.getElementById('pSchemasJson').value=p.schemas?JSON.stringify(p.schemas):'';
+    if(p.poolMax){document.getElementById('pPoolMax').value=p.poolMax;}
     editingProject=name;
     document.getElementById('pSubmitBtn').textContent='Modifier le projet';
     document.getElementById('pStatus').textContent='Mode modification: '+name;
