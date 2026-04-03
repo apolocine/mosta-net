@@ -1254,6 +1254,12 @@ ${C.cyan}└──────────────────────�
     const fullUrl = req.url as string;
     const subpath = fullUrl.substring(('/' + project).length);
 
+    // Health: /:project/health
+    if (subpath === '/health') {
+      const schemasCount = Array.isArray(projectInfo.schemas) ? projectInfo.schemas.length : 0;
+      return { status: 'ok', project, schemas: schemasCount };
+    }
+
     // REST: /:project/api/v1/:collection[/:id]
     if (subpath.startsWith('/api/v1/')) {
       const rest = subpath.replace('/api/v1/', '');
