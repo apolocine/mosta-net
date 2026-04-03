@@ -49,3 +49,6 @@ export { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasCon
 // Server
 export { startServer } from './server.js';
 export type { NetServer } from './server.js';
+
+// Smithery sandbox
+export { default as createSandboxServer } from './mcp-cli.js';
