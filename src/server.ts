@@ -1118,7 +1118,33 @@ ${C.cyan}└──────────────────────�
       'transports.sse': 'MOSTA_NET_SSE_ENABLED',
       'transports.jsonrpc': 'MOSTA_NET_JSONRPC_ENABLED',
       'transports.mcp': 'MOSTA_NET_MCP_ENABLED',
+      'transports.grpc': 'MOSTA_NET_GRPC_ENABLED',
+      'transports.trpc': 'MOSTA_NET_TRPC_ENABLED',
+      'transports.odata': 'MOSTA_NET_ODATA_ENABLED',
+      'transports.nats': 'MOSTA_NET_NATS_ENABLED',
+      'transports.arrow': 'MOSTA_NET_ARROW_ENABLED',
     };
+
+    // Check if key is a project property (e.g. "projects.analytics.dialect")
+    if (body.key.startsWith('projects.')) {
+      const parts = body.key.replace('projects.', '').split('.');
+      // parts[0] = project name, parts[1..] = property path
+      if (parts.length >= 2) {
+        const projectsPath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+        let tree: Record<string, any> = {};
+        try { tree = JSON.parse(readFileSync(projectsPath, 'utf-8')); } catch {}
+        const projName = parts[0];
+        if (!tree[projName]) tree[projName] = {};
+        let obj = tree[projName];
+        for (let i = 1; i < parts.length - 1; i++) {
+          if (!obj[parts[i]]) obj[parts[i]] = {};
+          obj = obj[parts[i]];
+        }
+        obj[parts[parts.length - 1]] = body.value;
+        writeFileSync(projectsPath, JSON.stringify(tree, null, 2), 'utf-8');
+        return { ok: true, key: body.key, file: 'projects-tree.json', value: body.value };
+      }
+    }
 
     const envVar = keyMap[body.key];
     if (!envVar) return { ok: false, error: `Cle inconnue: ${body.key}` };
@@ -1137,7 +1163,7 @@ ${C.cyan}└──────────────────────�
     }
     writeFileSync(envPath, content, 'utf-8');
 
-    return { ok: true, key: body.key, envVar, value: body.value };
+    return { ok: true, key: body.key, envVar, file: '.env', value: body.value };
   });
 
   // 8f. Serve logo
@@ -1648,6 +1674,15 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
     <div class="card stat"><div class="num">${entityList.length * transports.length}</div><div class="label">Endpoints</div></div>
   </div>
 
+  <!-- Global project selector -->
+  <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem;padding:.5rem .75rem;background:#1e293b;border-radius:8px">
+    <label style="font-size:.8rem;color:#94a3b8;white-space:nowrap;font-weight:600">Projet:</label>
+    <select id="globalProject" onchange="onGlobalProjectChange()" style="padding:.35rem .6rem;min-width:220px;border:1px solid #334155;border-radius:4px;background:#0f172a;color:#e2e8f0;font-size:.85rem">
+      <option value="">Tous les projets</option>
+    </select>
+    <span id="globalProjectStatus" style="font-size:.75rem;color:#64748b"></span>
+  </div>
+
   <!-- Navigation tabs -->
   <div class="nav-tabs">
     <button class="nav-tab active" onclick="showTab('dashboard')">Dashboard</button>
@@ -1860,16 +1895,13 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
 
   <h2>MCP Agent Simulator <span style="font-size:.75rem;color:#64748b;font-weight:normal">— test tools like an AI agent</span></h2>
   <div class="card">
-    <!-- Project selector + buttons -->
+    <!-- MCP buttons (project comes from global selector) -->
     <div style="display:flex;gap:.5rem;margin-bottom:.75rem;align-items:center;flex-wrap:wrap">
-      <label style="font-size:.75rem;color:#94a3b8">Projet:</label>
-      <select id="mcpProject" onchange="mcpLoadTools()" style="padding:.3rem .5rem;min-width:150px">
-        <option value="">Tous les projets</option>
-      </select>
       <button class="btn" style="font-size:.75rem;padding:.3rem .6rem" onclick="mcpLoadTools()">Tools</button>
       <button class="btn" style="font-size:.75rem;padding:.3rem .6rem;background:#6366f1" onclick="mcpLoadPrompts()">Prompts</button>
       <button class="btn" style="font-size:.75rem;padding:.3rem .6rem;background:#334155" onclick="mcpLoadInfo()">Info</button>
       <button class="btn" style="font-size:.75rem;padding:.3rem .6rem;background:#0f766e" onclick="mcpLoadProjectTree()">Arbre projet</button>
+      <span id="mcpProjectLabel" style="font-size:.75rem;color:#64748b"></span>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">
       <!-- Left: Tool selector -->
@@ -2059,6 +2091,59 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
 <script>
 const BASE=window.location.origin;
 
+// ── Global project context ──
+let _selectedProject='default';
+let _projectsCache=[];
+
+async function loadGlobalProjectDropdown(){
+  try{
+    const res=await fetch(BASE+'/api/projects');
+    _projectsCache=await res.json();
+    const sel=document.getElementById('globalProject');
+    sel.innerHTML='<option value="">Tous les projets</option>';
+    for(const p of _projectsCache){
+      const icon=p.status==='connected'?'🟢':p.status==='error'?'🔴':'⚪';
+      sel.innerHTML+='<option value="'+p.name+'">'+icon+' '+p.name+' ('+p.dialect+', '+p.schemasCount+' schemas)</option>';
+    }
+    sel.value=_selectedProject||'default';
+    updateGlobalProjectStatus();
+  }catch(e){}
+}
+
+function onGlobalProjectChange(){
+  _selectedProject=document.getElementById('globalProject').value;
+  updateGlobalProjectStatus();
+  refreshActiveTab();
+}
+
+function updateGlobalProjectStatus(){
+  const st=document.getElementById('globalProjectStatus');
+  if(!_selectedProject){st.textContent='Contexte: tous les projets';return;}
+  const p=_projectsCache.find(pr=>pr.name===_selectedProject);
+  if(p){
+    const icon=p.status==='connected'?'🟢':p.status==='error'?'🔴':'⚪';
+    st.textContent=icon+' '+p.dialect+' — '+p.schemasCount+' schemas';
+  }else{st.textContent='';}
+}
+
+function getActiveTabName(){
+  const active=document.querySelector('.tab-content.active');
+  return active?active.id.replace('tab-',''):'dashboard';
+}
+
+function refreshActiveTab(){
+  const name=getActiveTabName();
+  if(name==='dashboard')refreshDashboard();
+  if(name==='projects'){loadProjects();loadConfigTree();loadSchemaElectro();loadPerf();}
+  if(name==='mcp'){updateMcpProjectLabel();mcpLoadTools();}
+  if(name==='admin')refreshAdminEntities();
+}
+
+function updateMcpProjectLabel(){
+  const el=document.getElementById('mcpProjectLabel');
+  if(el)el.textContent=_selectedProject?'Projet: '+_selectedProject:'Tous les projets';
+}
+
 // Tab navigation
 function showTab(name){
   document.querySelectorAll('.tab-content').forEach(el=>el.classList.remove('active'));
@@ -2066,8 +2151,36 @@ function showTab(name){
   const tab=document.getElementById('tab-'+name);
   if(tab)tab.classList.add('active');
   event.target.classList.add('active');
+  refreshActiveTab();
 }
 const SCHEMAS=${JSON.stringify(schemas.map(s => ({ name: s.name, collection: s.collection })))};
+
+// ── Dashboard: refresh config for selected project ──
+async function refreshDashboard(){
+  const project=_selectedProject;
+  const p=_projectsCache.find(pr=>pr.name===project);
+  if(!p&&project&&project!=='default'){return;}
+  // If specific non-default project: show its config
+  if(p&&project!=='default'){
+    document.getElementById('dialectSelect').value=p.dialect||'sqlite';
+    document.getElementById('dialectUri').value=p.uri||'';
+    onDialectChange();
+  }
+}
+
+// ── Admin: refresh entities for selected project ──
+function refreshAdminEntities(){
+  const project=_selectedProject;
+  if(!project||project==='default')return;
+  const p=_projectsCache.find(pr=>pr.name===project);
+  if(!p||!p.schemas)return;
+  const sel=document.getElementById('exEntity');
+  if(!sel)return;
+  sel.innerHTML='';
+  for(const s of p.schemas){
+    sel.innerHTML+='<option value="'+s+'">'+s+'</option>';
+  }
+}
 
 // ── Projects management ──
 async function loadProjects(){
@@ -2082,7 +2195,9 @@ async function loadProjects(){
     for(const p of projects){
       const icon=statusIcon[p.status]||'⚪';
       const schemas=p.schemas?.join(', ')||'-';
-      html+='<tr style="border-bottom:1px solid #1e293b">';
+      const isSelected=p.name===_selectedProject;
+      const rowBg=isSelected?'background:#1e3a5f;border-left:3px solid #38bdf8;':'';
+      html+='<tr style="border-bottom:1px solid #1e293b;cursor:pointer;'+rowBg+'" onclick="selectProjectFromTable(&quot;'+p.name+'&quot;)">';
       html+='<td style="padding:.4rem">'+icon+'</td>';
       html+='<td style="padding:.4rem;font-weight:600">'+p.name+'</td>';
       html+='<td style="padding:.4rem;color:#94a3b8">'+p.dialect+'</td>';
@@ -2109,6 +2224,16 @@ async function loadProjects(){
     el.innerHTML=html;
   }catch(e){document.getElementById('projectsTable').innerHTML='<span style="color:#f87171">Erreur: '+e.message+'</span>';}
 }
+function selectProjectFromTable(name){
+  _selectedProject=name;
+  document.getElementById('globalProject').value=name;
+  updateGlobalProjectStatus();
+  loadProjects();
+  loadConfigTree();
+  loadSchemaElectro();
+  loadPerf();
+}
+
 const P_DIALECT_INFO={
   postgres:{hint:'postgresql://user:pass@localhost:5432/dbname',port:5432,type:'SQL'},
   mysql:{hint:'mysql://user:pass@localhost:3306/dbname',port:3306,type:'SQL'},
@@ -2405,20 +2530,6 @@ async function loadPerf(){
 
 // ── MCP Agent Simulator ──
 let mcpLog=[];
-// Populate project dropdown
-async function mcpLoadProjectDropdown(){
-  try{
-    const res=await fetch(BASE+'/api/projects');
-    const projects=await res.json();
-    const sel=document.getElementById('mcpProject');
-    sel.innerHTML='<option value="">Tous les projets</option>';
-    for(const p of projects){
-      const icon=p.status==='connected'?'🟢':p.status==='error'?'🔴':'⚪';
-      sel.innerHTML+='<option value="'+p.name+'">'+icon+' '+p.name+' ('+p.dialect+', '+p.schemasCount+' schemas)</option>';
-    }
-  }catch(e){}
-}
-setTimeout(mcpLoadProjectDropdown,600);
 function mcpAddLog(dir,data){
   const ts=new Date().toLocaleTimeString();
   mcpLog.unshift({ts,dir,data});
@@ -2439,7 +2550,7 @@ async function mcpLoadTools(){
   try{
     const res=await fetch(BASE+'/api/mcp-agent/tools');
     let tools=await res.json();
-    const selectedProject=document.getElementById('mcpProject').value;
+    const selectedProject=_selectedProject;
     // Filter by project
     if(selectedProject){
       tools=tools.filter(t=>{
@@ -2528,7 +2639,7 @@ function mcpSelectPrompt(name){
   document.getElementById('mcpResult').style.color='#a78bfa';
 }
 async function mcpLoadProjectTree(){
-  const selectedProject=document.getElementById('mcpProject').value;
+  const selectedProject=_selectedProject;
   if(!selectedProject){
     document.getElementById('mcpToolList').innerHTML='<span style="color:#f87171">Selectionnez un projet d\\'abord</span>';
     return;
@@ -2609,6 +2720,7 @@ async function mcpCallTool(){
 }
 
 // Load all on page load
+setTimeout(loadGlobalProjectDropdown,100);
 setTimeout(loadProjects,200);
 setTimeout(loadConfigTree,300);
 setTimeout(loadSchemaElectro,400);
@@ -2636,16 +2748,18 @@ async function doExplore(){
   let url='',method='GET',reqBody=null;
   const headers={'Content-Type':'application/json'};
   if(apiKey)headers['Authorization']='Bearer '+apiKey;
+  // Project-aware REST prefix
+  const projectPrefix=(_selectedProject&&_selectedProject!=='default')?_selectedProject+'/':'';
 
   try{
     if(transport==='rest'){
       switch(op){
-        case 'findAll':url=BASE+'/api/v1/'+col;break;
-        case 'findById':url=BASE+'/api/v1/'+col+'/'+id;break;
-        case 'count':url=BASE+'/api/v1/'+col+'/count';break;
-        case 'create':url=BASE+'/api/v1/'+col;method='POST';reqBody=body||'{}';break;
-        case 'update':url=BASE+'/api/v1/'+col+'/'+id;method='PUT';reqBody=body||'{}';break;
-        case 'delete':url=BASE+'/api/v1/'+col+'/'+id;method='DELETE';break;
+        case 'findAll':url=BASE+'/api/v1/'+projectPrefix+col;break;
+        case 'findById':url=BASE+'/api/v1/'+projectPrefix+col+'/'+id;break;
+        case 'count':url=BASE+'/api/v1/'+projectPrefix+col+'/count';break;
+        case 'create':url=BASE+'/api/v1/'+projectPrefix+col;method='POST';reqBody=body||'{}';break;
+        case 'update':url=BASE+'/api/v1/'+projectPrefix+col+'/'+id;method='PUT';reqBody=body||'{}';break;
+        case 'delete':url=BASE+'/api/v1/'+projectPrefix+col+'/'+id;method='DELETE';break;
       }
     }else if(transport==='graphql'){
       url=BASE+'/graphql';method='POST';
