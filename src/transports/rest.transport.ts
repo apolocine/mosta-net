@@ -72,98 +72,127 @@ export class RestTransport implements ITransport {
   // Route generation
   // ============================================================
 
+  /** Parse common query options (sort, limit, skip, select, exclude, relations) */
+  private parseQueryOptions(query: Record<string, string>): { options: any; relations?: string[] } {
+    const options: any = {};
+    if (query.sort) options.sort = JSON.parse(query.sort);
+    if (query.limit) options.limit = parseInt(query.limit, 10);
+    if (query.skip) options.skip = parseInt(query.skip, 10);
+    if (query.select) options.select = query.select.split(',');
+    if (query.exclude) options.exclude = query.exclude.split(',');
+    const relations = (query.relations || query.include)?.split(',').filter(Boolean);
+    return { options, relations: relations?.length ? relations : undefined };
+  }
+
   private registerRoutes(schema: EntitySchema): void {
     if (!this.app) return;
     const prefix = this.config?.path || '/api/v1';
-    const collection = schema.collection;
+    const col = schema.collection;
 
-    // GET /api/v1/{collection} → findAll
-    this.app.get(`${prefix}/${collection}`, async (req: FastifyRequest, reply: FastifyReply) => {
+    // ── Specific routes BEFORE parametric /:id ──────────
+
+    // GET /count → count
+    this.app.get(`${prefix}/${col}/count`, async (req: FastifyRequest, reply: FastifyReply) => {
       const query = req.query as Record<string, string>;
-      const ormReq: OrmRequest = {
-        op: 'findAll',
-        entity: schema.name,
-        filter: query.filter ? JSON.parse(query.filter) : {},
-        options: {
-          sort: query.sort ? JSON.parse(query.sort) : undefined,
-          limit: query.limit ? parseInt(query.limit, 10) : undefined,
-          skip: query.skip ? parseInt(query.skip, 10) : undefined,
-          select: query.select ? query.select.split(',') : undefined,
-        },
-      };
-      return this.handle(ormReq, reply);
+      return this.handle({ op: 'count', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {} }, reply);
     });
 
-    // GET /api/v1/{collection}/:id → findById
-    this.app.get(`${prefix}/${collection}/:id`, async (req: FastifyRequest, reply: FastifyReply) => {
+    // GET /one → findOne
+    this.app.get(`${prefix}/${col}/one`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const query = req.query as Record<string, string>;
+      const { options, relations } = this.parseQueryOptions(query);
+      return this.handle({ op: 'findOne', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {}, options, relations }, reply);
+    });
+
+    // POST /search → search
+    this.app.post(`${prefix}/${col}/search`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = req.body as Record<string, unknown>;
+      return this.handle({ op: 'search', entity: schema.name, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply);
+    });
+
+    // POST /upsert → upsert
+    this.app.post(`${prefix}/${col}/upsert`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const { filter, data } = req.body as { filter: any; data: any };
+      return this.handle({ op: 'upsert', entity: schema.name, filter, data }, reply);
+    });
+
+    // POST /aggregate → aggregate
+    this.app.post(`${prefix}/${col}/aggregate`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const { stages } = req.body as { stages: any[] };
+      return this.handle({ op: 'aggregate', entity: schema.name, stages }, reply);
+    });
+
+    // PUT /bulk → updateMany
+    this.app.put(`${prefix}/${col}/bulk`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const { filter, data } = req.body as { filter: any; data: any };
+      return this.handle({ op: 'updateMany', entity: schema.name, filter, data }, reply);
+    });
+
+    // DELETE /bulk → deleteMany
+    this.app.delete(`${prefix}/${col}/bulk`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = req.body as Record<string, unknown> | null;
+      const query = req.query as Record<string, string>;
+      const filter = body?.filter || (query.filter ? JSON.parse(query.filter) : {});
+      return this.handle({ op: 'deleteMany', entity: schema.name, filter }, reply);
+    });
+
+    // ── Parametric /:id routes ──────────────────────────
+
+    // GET /:id → findById (with optional ?relations=)
+    this.app.get(`${prefix}/${col}/:id`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { id } = req.params as { id: string };
       const query = req.query as Record<string, string>;
-      const ormReq: OrmRequest = {
-        op: 'findById',
-        entity: schema.name,
-        id,
-        relations: query.include ? query.include.split(',') : undefined,
-      };
-      return this.handle(ormReq, reply);
+      const { options, relations } = this.parseQueryOptions(query);
+      return this.handle({ op: 'findById', entity: schema.name, id, options, relations }, reply);
     });
 
-    // POST /api/v1/{collection} → create
-    this.app.post(`${prefix}/${collection}`, async (req: FastifyRequest, reply: FastifyReply) => {
-      const ormReq: OrmRequest = {
-        op: 'create',
-        entity: schema.name,
-        data: req.body as Record<string, unknown>,
-      };
-      const res = await this.handle(ormReq, reply);
+    // PUT /:id → update
+    this.app.put(`${prefix}/${col}/:id`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const { id } = req.params as { id: string };
+      return this.handle({ op: 'update', entity: schema.name, id, data: req.body as Record<string, unknown> }, reply);
+    });
+
+    // DELETE /:id → delete
+    this.app.delete(`${prefix}/${col}/:id`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const { id } = req.params as { id: string };
+      return this.handle({ op: 'delete', entity: schema.name, id }, reply);
+    });
+
+    // POST /:id/addToSet → addToSet
+    this.app.post(`${prefix}/${col}/:id/addToSet`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const { id } = req.params as { id: string };
+      const { field, value } = req.body as { field: string; value: unknown };
+      return this.handle({ op: 'addToSet', entity: schema.name, id, field, value }, reply);
+    });
+
+    // POST /:id/pull → pull
+    this.app.post(`${prefix}/${col}/:id/pull`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const { id } = req.params as { id: string };
+      const { field, value } = req.body as { field: string; value: unknown };
+      return this.handle({ op: 'pull', entity: schema.name, id, field, value }, reply);
+    });
+
+    // POST /:id/increment → increment
+    this.app.post(`${prefix}/${col}/:id/increment`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const { id } = req.params as { id: string };
+      const { field, amount } = req.body as { field: string; amount: number };
+      return this.handle({ op: 'increment', entity: schema.name, id, field, amount }, reply);
+    });
+
+    // ── Collection-level routes ─────────────────────────
+
+    // GET / → findAll (with optional ?relations=, ?select=, ?exclude=)
+    this.app.get(`${prefix}/${col}`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const query = req.query as Record<string, string>;
+      const { options, relations } = this.parseQueryOptions(query);
+      return this.handle({ op: 'findAll', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {}, options, relations }, reply);
+    });
+
+    // POST / → create
+    this.app.post(`${prefix}/${col}`, async (req: FastifyRequest, reply: FastifyReply) => {
+      const res = await this.handle({ op: 'create', entity: schema.name, data: req.body as Record<string, unknown> }, reply);
       if (reply.statusCode < 400) reply.status(201);
       return res;
-    });
-
-    // PUT /api/v1/{collection}/:id → update
-    this.app.put(`${prefix}/${collection}/:id`, async (req: FastifyRequest, reply: FastifyReply) => {
-      const { id } = req.params as { id: string };
-      const ormReq: OrmRequest = {
-        op: 'update',
-        entity: schema.name,
-        id,
-        data: req.body as Record<string, unknown>,
-      };
-      return this.handle(ormReq, reply);
-    });
-
-    // DELETE /api/v1/{collection}/:id → delete
-    this.app.delete(`${prefix}/${collection}/:id`, async (req: FastifyRequest, reply: FastifyReply) => {
-      const { id } = req.params as { id: string };
-      const ormReq: OrmRequest = {
-        op: 'delete',
-        entity: schema.name,
-        id,
-      };
-      return this.handle(ormReq, reply);
-    });
-
-    // GET /api/v1/{collection}/count → count
-    this.app.get(`${prefix}/${collection}/count`, async (req: FastifyRequest, reply: FastifyReply) => {
-      const query = req.query as Record<string, string>;
-      const ormReq: OrmRequest = {
-        op: 'count',
-        entity: schema.name,
-        filter: query.filter ? JSON.parse(query.filter) : {},
-      };
-      return this.handle(ormReq, reply);
-    });
-
-    // POST /api/v1/{collection}/search → search
-    this.app.post(`${prefix}/${collection}/search`, async (req: FastifyRequest, reply: FastifyReply) => {
-      const body = req.body as Record<string, unknown>;
-      const ormReq: OrmRequest = {
-        op: 'search',
-        entity: schema.name,
-        query: body.query as string,
-        searchFields: body.fields as string[],
-        options: body.options as any,
-      };
-      return this.handle(ormReq, reply);
     });
   }
 

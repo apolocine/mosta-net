@@ -64,14 +64,22 @@ export class GraphQLTransport implements ITransport {
       types.push(`input ${name}Input {\n${inputFields.join('\n')}\n}`);
 
       // Queries
-      queries.push(`  ${lcfirst(name)}s(filter: String, limit: Int, skip: Int, sort: String): [${name}!]!`);
-      queries.push(`  ${lcfirst(name)}(id: ID!): ${name}`);
+      queries.push(`  ${lcfirst(name)}s(filter: String, limit: Int, skip: Int, sort: String, relations: String, select: String, exclude: String): [${name}!]!`);
+      queries.push(`  ${lcfirst(name)}(id: ID!, relations: String): ${name}`);
+      queries.push(`  ${lcfirst(name)}One(filter: String!, relations: String): ${name}`);
       queries.push(`  ${lcfirst(name)}Count(filter: String): Int!`);
+      queries.push(`  ${lcfirst(name)}Search(query: String!, fields: String, limit: Int, skip: Int): [${name}!]!`);
 
       // Mutations
       mutations.push(`  create${name}(input: ${name}Input!): ${name}!`);
       mutations.push(`  update${name}(id: ID!, input: ${name}Input!): ${name}`);
       mutations.push(`  delete${name}(id: ID!): Boolean!`);
+      mutations.push(`  upsert${name}(filter: String!, input: ${name}Input!): ${name}!`);
+      mutations.push(`  deleteMany${name}s(filter: String!): Int!`);
+      mutations.push(`  updateMany${name}s(filter: String!, input: ${name}Input!): Int!`);
+      mutations.push(`  addToSet${name}(id: ID!, field: String!, value: String!): ${name}`);
+      mutations.push(`  pull${name}(id: ID!, field: String!, value: String!): ${name}`);
+      mutations.push(`  increment${name}(id: ID!, field: String!, amount: Float!): ${name}`);
     }
 
     return [
@@ -91,39 +99,63 @@ export class GraphQLTransport implements ITransport {
     for (const schema of this.schemas) {
       const name = schema.name;
 
-      // Query: users(filter, limit, skip, sort)
+      // ── Queries ──────────────────────────────────────
+
+      // Query: users(filter, limit, skip, sort, relations, select, exclude)
       Query[`${lcfirst(name)}s`] = async (_: any, args: any) => {
         this.stats.requests++;
-        const req: OrmRequest = {
-          op: 'findAll',
-          entity: name,
+        const options: any = { limit: args.limit, skip: args.skip };
+        if (args.sort) options.sort = JSON.parse(args.sort);
+        if (args.select) options.select = args.select.split(',');
+        if (args.exclude) options.exclude = args.exclude.split(',');
+        const relations = args.relations?.split(',').filter(Boolean);
+        const res = await this.callOrm({
+          op: 'findAll', entity: name,
           filter: args.filter ? JSON.parse(args.filter) : {},
-          options: {
-            limit: args.limit,
-            skip: args.skip,
-            sort: args.sort ? JSON.parse(args.sort) : undefined,
-          },
-        };
-        const res = await this.callOrm(req);
+          options, relations: relations?.length ? relations : undefined,
+        });
         return res.data || [];
       };
 
-      // Query: user(id)
-      Query[lcfirst(name)] = async (_: any, args: { id: string }) => {
+      // Query: user(id, relations)
+      Query[lcfirst(name)] = async (_: any, args: any) => {
         this.stats.requests++;
-        const res = await this.callOrm({ op: 'findById', entity: name, id: args.id });
+        const relations = args.relations?.split(',').filter(Boolean);
+        const res = await this.callOrm({ op: 'findById', entity: name, id: args.id, relations: relations?.length ? relations : undefined });
+        return res.data;
+      };
+
+      // Query: userOne(filter, relations)
+      Query[`${lcfirst(name)}One`] = async (_: any, args: any) => {
+        this.stats.requests++;
+        const relations = args.relations?.split(',').filter(Boolean);
+        const res = await this.callOrm({
+          op: 'findOne', entity: name,
+          filter: args.filter ? JSON.parse(args.filter) : {},
+          relations: relations?.length ? relations : undefined,
+        });
         return res.data;
       };
 
       // Query: userCount(filter)
       Query[`${lcfirst(name)}Count`] = async (_: any, args: any) => {
         this.stats.requests++;
-        const res = await this.callOrm({
-          op: 'count', entity: name,
-          filter: args.filter ? JSON.parse(args.filter) : {},
-        });
+        const res = await this.callOrm({ op: 'count', entity: name, filter: args.filter ? JSON.parse(args.filter) : {} });
         return res.data || 0;
       };
+
+      // Query: userSearch(query, fields, limit, skip)
+      Query[`${lcfirst(name)}Search`] = async (_: any, args: any) => {
+        this.stats.requests++;
+        const res = await this.callOrm({
+          op: 'search', entity: name, query: args.query,
+          searchFields: args.fields?.split(','),
+          options: { limit: args.limit, skip: args.skip },
+        });
+        return res.data || [];
+      };
+
+      // ── Mutations ─────────────────────────────────────
 
       // Mutation: createUser(input)
       Mutation[`create${name}`] = async (_: any, args: { input: Record<string, unknown> }) => {
@@ -146,6 +178,49 @@ export class GraphQLTransport implements ITransport {
         this.stats.requests++;
         const res = await this.callOrm({ op: 'delete', entity: name, id: args.id });
         return res.data === true;
+      };
+
+      // Mutation: upsertUser(filter, input)
+      Mutation[`upsert${name}`] = async (_: any, args: { filter: string; input: Record<string, unknown> }) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'upsert', entity: name, filter: JSON.parse(args.filter), data: args.input });
+        if (res.status === 'error') throw new Error(res.error?.message);
+        return res.data;
+      };
+
+      // Mutation: deleteManyUsers(filter)
+      Mutation[`deleteMany${name}s`] = async (_: any, args: { filter: string }) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'deleteMany', entity: name, filter: JSON.parse(args.filter) });
+        return res.metadata?.count ?? 0;
+      };
+
+      // Mutation: updateManyUsers(filter, input)
+      Mutation[`updateMany${name}s`] = async (_: any, args: { filter: string; input: Record<string, unknown> }) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'updateMany', entity: name, filter: JSON.parse(args.filter), data: args.input });
+        return res.metadata?.count ?? 0;
+      };
+
+      // Mutation: addToSetUser(id, field, value)
+      Mutation[`addToSet${name}`] = async (_: any, args: { id: string; field: string; value: string }) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'addToSet', entity: name, id: args.id, field: args.field, value: JSON.parse(args.value) });
+        return res.data;
+      };
+
+      // Mutation: pullUser(id, field, value)
+      Mutation[`pull${name}`] = async (_: any, args: { id: string; field: string; value: string }) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'pull', entity: name, id: args.id, field: args.field, value: JSON.parse(args.value) });
+        return res.data;
+      };
+
+      // Mutation: incrementUser(id, field, amount)
+      Mutation[`increment${name}`] = async (_: any, args: { id: string; field: string; amount: number }) => {
+        this.stats.requests++;
+        const res = await this.callOrm({ op: 'increment', entity: name, id: args.id, field: args.field, amount: args.amount });
+        return res.data;
       };
     }
 

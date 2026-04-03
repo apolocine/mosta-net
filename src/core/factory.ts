@@ -18,14 +18,11 @@ async function loadTransportModule(name: TransportName): Promise<{ createTranspo
     case 'ws':       return import('../transports/ws.transport.js');
     case 'jsonrpc':  return import('../transports/jsonrpc.transport.js');
     case 'mcp':      return import('../transports/mcp.transport.js');
-    // Future transports:
-    // case 'sse':      return import('../transports/sse.transport.js');
-    // case 'trpc':     return import('../transports/trpc.transport.js');
-    // case 'mcp':      return import('../transports/mcp.transport.js');
-    // case 'odata':    return import('../transports/odata.transport.js');
-    // case 'arrow':    return import('../transports/arrow.transport.js');
-    // case 'jsonrpc':  return import('../transports/jsonrpc.transport.js');
-    // case 'nats':     return import('../transports/nats.transport.js');
+    case 'grpc':     return import('../transports/grpc.transport.js');
+    case 'trpc':     return import('../transports/trpc.transport.js');
+    case 'odata':    return import('../transports/odata.transport.js');
+    case 'nats':     return import('../transports/nats.transport.js');
+    case 'arrow':    return import('../transports/arrow.transport.js');
     default:
       throw new Error(`Transport "${name}" is not yet implemented`);
   }
