@@ -16,7 +16,7 @@ const SANDBOX_SCHEMAS = [
 /**
  * Smithery sandbox — returns an McpServer with demo schemas for tool scanning.
  */
-export function createSandboxServer(): McpServer {
+export default function createSandboxServer(): McpServer {
   const server = new McpServer(
     { name: 'OctoNet MCP', version: '2.0.42' },
     { capabilities: { tools: {}, resources: {}, prompts: {} } },
@@ -40,6 +40,9 @@ export function createSandboxServer(): McpServer {
   return server;
 }
 
-// Normal CLI mode — redirect to main CLI
-process.argv.splice(2, 0, 'mcp');
-import('./cli.js');
+// Normal CLI mode — redirect to main CLI (skip if imported as module for scanning)
+const isMainModule = process.argv[1]?.includes('mcp-cli') || process.argv[1]?.includes('octonet-mcp');
+if (isMainModule) {
+  process.argv.splice(2, 0, 'mcp');
+  import('./cli.js');
+}
