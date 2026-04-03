@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.apolocine/mosta-net",
+  "description": "1 MCP server, 13 databases, zero config. Multi-protocol transport with Auth + RBAC.",
+  "repository": {
+    "url": "https://github.com/apolocine/mosta-net",
+    "source": "github"
+  },
+  "version": "2.0.41",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@mostajs/net",
+      "version": "2.0.41",
+      "transport": { "type": "stdio" }
+    }
+  ]
+}
