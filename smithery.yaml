@@ -1,0 +1,6 @@
+name: octonet-mcp
+description: "1 MCP server, 13 databases, zero config. 15 tools per entity + 4 AI prompts. Auth + RBAC included."
+startCommand:
+  type: stdio
+  command: npx
+  args: ["octonet-mcp", "--dialect=sqlite", "--uri=:memory:"]
