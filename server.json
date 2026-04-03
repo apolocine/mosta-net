@@ -6,12 +6,12 @@
     "url": "https://github.com/apolocine/mosta-net",
     "source": "github"
   },
-  "version": "2.0.41",
+  "version": "2.0.42",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@mostajs/net",
-      "version": "2.0.41",
+      "version": "2.0.42",
       "transport": { "type": "stdio" }
     }
   ]
