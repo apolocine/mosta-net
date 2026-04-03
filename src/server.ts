@@ -2158,27 +2158,43 @@ const SCHEMAS=${JSON.stringify(schemas.map(s => ({ name: s.name, collection: s.c
 // ── Dashboard: refresh config for selected project ──
 async function refreshDashboard(){
   const project=_selectedProject;
-  const p=_projectsCache.find(pr=>pr.name===project);
-  if(!p&&project&&project!=='default'){return;}
-  // If specific non-default project: show its config
-  if(p&&project!=='default'){
+  if(!project||project==='default'){
+    // Restore default config from process.env (reload page values)
+    document.getElementById('dialectSelect').value='${dialect}';
+    document.getElementById('dialectUri').value='${dbUri}';
+    onDialectChange();
+    return;
+  }
+  // Fetch project details for non-default
+  try{
+    const res=await fetch(BASE+'/api/projects');
+    const projects=await res.json();
+    const p=projects.find(pr=>pr.name===project);
+    if(!p)return;
     document.getElementById('dialectSelect').value=p.dialect||'sqlite';
     document.getElementById('dialectUri').value=p.uri||'';
     onDialectChange();
-  }
+  }catch(e){}
 }
 
 // ── Admin: refresh entities for selected project ──
 function refreshAdminEntities(){
   const project=_selectedProject;
-  if(!project||project==='default')return;
-  const p=_projectsCache.find(pr=>pr.name===project);
-  if(!p||!p.schemas)return;
   const sel=document.getElementById('exEntity');
   if(!sel)return;
+  if(!project||project==='default'){
+    // Restore default entities from SCHEMAS
+    sel.innerHTML='';
+    for(const s of SCHEMAS){
+      sel.innerHTML+='<option value="'+s.name+'">'+s.name+'</option>';
+    }
+    return;
+  }
+  const p=_projectsCache.find(pr=>pr.name===project);
+  if(!p||!p.schemas)return;
   sel.innerHTML='';
   for(const s of p.schemas){
-    sel.innerHTML+='<option value="'+s+'">'+s+'</option>';
+    sel.innerHTML+='<option value="'+s+'">'+s+' ('+project+')</option>';
   }
 }
 
@@ -2382,6 +2398,20 @@ async function loadConfigTree(){
     const res=await fetch(BASE+'/api/config-tree');
     const {tree}=await res.json();
     const el=document.getElementById('configTree');
+    const project=_selectedProject;
+    // If a non-default project is selected, build a project-specific tree
+    if(project&&project!=='default'){
+      const p=(tree.projects||[]).find(pr=>pr.name===project);
+      if(p){
+        const projectTree={
+          database:{dialect:p.dialect||'?',uri:p.uri||'—',schemasCount:p.schemasCount||0,schemas:p.schemas||[],status:p.status||'unknown',poolMax:p.poolMax||10},
+          transports:tree.transports||{},
+        };
+        el.innerHTML='<div style="margin-bottom:.5rem;font-size:.8rem;color:#38bdf8;font-weight:600">Projet: '+project+'</div>'+renderTree(projectTree,'projects.'+project);
+        return;
+      }
+    }
+    // Default: show global tree
     el.innerHTML=renderTree(tree,'');
   }catch(e){document.getElementById('configTree').innerHTML='<span style="color:#f87171">'+e.message+'</span>';}
 }
