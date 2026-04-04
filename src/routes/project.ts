@@ -56,7 +56,8 @@ export function registerProjectRoutes(
     const url = req.url as string;
     const parts = url.split('/').filter(Boolean);
     const collIdx = parts.indexOf(collection);
-    const id = parts[collIdx + 1] || null;
+    const rawId = parts[collIdx + 1] || null;
+    const id = rawId ? rawId.split('?')[0] : null;
     const body = req.body as Record<string, unknown> | undefined;
 
     // Parse query params
