@@ -6,6 +6,20 @@ import type { FastifyInstance } from 'fastify';
 import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
 import type { TransportContext } from '../core/types.js';
 import { McpTransport } from '../transports/mcp.transport.js';
+import { randomBytes, scryptSync } from 'crypto';
+
+/** Hash password — uses bcryptjs if available, falls back to scrypt */
+async function hashPassword(plain: string): Promise<string> {
+  try {
+    const bcrypt = await import('bcryptjs');
+    return bcrypt.default.hash(plain, 10);
+  } catch {
+    // Fallback: scrypt with salt, format: $scrypt$salt$hash
+    const salt = randomBytes(16).toString('hex');
+    const hash = scryptSync(plain, salt, 64).toString('hex');
+    return `$scrypt$${salt}$${hash}`;
+  }
+}
 
 type OrmHandler = (req: OrmRequest, ctx: TransportContext) => Promise<OrmResponse>;
 
@@ -213,8 +227,13 @@ export function registerProjectRoutes(
         let created = 0;
         for (const record of seed.data) {
           try {
+            // Hash password fields before insertion
+            const data = { ...record };
+            if (typeof data.password === 'string' && data.password.length < 128 && !data.password.startsWith('$')) {
+              data.password = await hashPassword(data.password);
+            }
             const ctx: TransportContext = { transport: 'seed', projectName: project };
-            await ormHandler({ entity: schema.name, op: 'create', data: record }, ctx);
+            await ormHandler({ entity: schema.name, op: 'create', data }, ctx);
             created++;
           } catch (e: unknown) {
             results.push({ collection: seed.collection, created, error: e instanceof Error ? e.message : 'Seed failed' });
