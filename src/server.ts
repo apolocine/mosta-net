@@ -2264,7 +2264,10 @@ async function loadProjects(){
         html+='<button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#3b82f6" onclick="editProject(&quot;'+p.name+'&quot;)">✎</button> ';
         html+='<button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#ef4444" onclick="deleteProject(&quot;'+p.name+'&quot;)">✕</button> ';
       }
-      html+='<button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#22c55e" onclick="testProject(&quot;'+p.name+'&quot;)">Test</button>';
+      html+='<button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#22c55e" onclick="testProject(&quot;'+p.name+'&quot;)">Test</button> ';
+      if(p.name!=='default'){
+        html+='<a class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#8b5cf6;text-decoration:none" href="/'+p.name+'/" target="_blank">Ouvrir</a>';
+      }
       html+='</td></tr>';
       // Routing info
       if(p.name!=='default'){
