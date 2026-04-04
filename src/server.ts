@@ -1218,9 +1218,20 @@ ${C.cyan}└──────────────────────�
     const id = parts[collIdx + 1] || null;
     const body = req.body as Record<string, unknown> | undefined;
 
+    // Parse query params
+    const urlObj = new URL(url, 'http://localhost');
+    const query: Record<string, string> = {};
+    urlObj.searchParams.forEach((v, k) => { query[k] = v; });
+    const filter = query.filter ? JSON.parse(query.filter) : undefined;
+    const limit = query.limit ? parseInt(query.limit) : undefined;
+    const skip = query.skip ? parseInt(query.skip) : undefined;
+    const sort = query.sort ? JSON.parse(query.sort) : undefined;
+
     const ormReq: OrmRequest = { entity: schema.name, op: 'findAll' };
-    if (method === 'GET' && !id) { ormReq.op = 'findAll'; }
-    else if (method === 'GET' && id === 'count') { ormReq.op = 'count'; }
+    if (method === 'GET' && !id) { ormReq.op = 'findAll'; if (filter) ormReq.filter = filter; if (limit || skip || sort) ormReq.options = { limit, skip, sort }; }
+    else if (method === 'GET' && id === 'count') { ormReq.op = 'count'; if (filter) ormReq.filter = filter; }
+    else if (method === 'GET' && id === 'one') { ormReq.op = 'findOne'; if (filter) ormReq.filter = filter; }
+    else if (method === 'GET' && id === 'search') { ormReq.op = 'search'; ormReq.query = query.q || query.query || ''; if (limit) ormReq.options = { limit }; }
     else if (method === 'GET' && id) { ormReq.op = 'findById'; ormReq.id = id; }
     else if (method === 'POST') { ormReq.op = 'create'; ormReq.data = body; }
     else if (method === 'PUT' && id) { ormReq.op = 'update'; ormReq.id = id; ormReq.data = body; }
@@ -1333,9 +1344,19 @@ ${C.cyan}└──────────────────────�
         }
         // Save schemas/{projectName}.json
         const fs = await import('fs');
+        const { resolve: resolvePath } = await import('path');
         if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
         const fileName = 'schemas/' + project + '.json';
         fs.writeFileSync(fileName, JSON.stringify(body.schemas, null, 2));
+        // Update projects-tree.json to reference the schema file (persists across restarts)
+        const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+        try {
+          const tree = JSON.parse(fs.readFileSync(treePath, 'utf-8'));
+          if (tree[project]) {
+            tree[project].schemas = fileName;
+            fs.writeFileSync(treePath, JSON.stringify(tree, null, 2));
+          }
+        } catch {}
         console.log(`  schemas ${project}: ${body.schemas.length} schemas saved to ${fileName}`);
         return { ok: true, count: body.schemas.length, file: fileName, schemas: body.schemas.map((s: any) => s.name) };
       } catch (e: unknown) {
