@@ -152,37 +152,58 @@ export function registerProjectRoutes(
       };
     }
 
-    // ── Step 1: Upload schemas (save file + update memory only) ──
+    // ── Step 1: Upload schemas (save file ONLY — no DB connection, no pm.updateProject) ──
     if ((subpath === '/api/upload-schemas' || subpath === '/api/upload-schemas-json') && req.method === 'POST') {
       const body = req.body as { schemas?: any[] };
       if (!body?.schemas?.length) return { ok: false, error: 'No schemas provided' };
       try {
-        await pm.updateProject(project, { schemas: body.schemas });
         const fs = await import('fs');
         if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
         const fileName = 'schemas/' + project + '.json';
         fs.writeFileSync(fileName, JSON.stringify(body.schemas, null, 2));
-        console.log(`  [${project}] Step 1/3: ${body.schemas.length} schemas uploaded → ${fileName}`);
+        console.log(`  [${project}] Step 1/3: ${body.schemas.length} schemas saved to ${fileName} (file only, no DB)`);
         return { ok: true, step: 1, count: body.schemas.length, file: fileName, schemas: body.schemas.map((s: any) => s.name) };
       } catch (e: unknown) {
         return { ok: false, error: e instanceof Error ? e.message : 'Upload failed' };
       }
     }
 
-    // ── Step 2: Apply schema (create/update tables in DB) ──
+    // ── Step 2: Apply schema (load schemas from file, update project, create tables) ──
     if (subpath === '/api/apply-schema' && req.method === 'POST') {
-      const projectCtx = pm.getProject(project);
-      const projectDialect = projectCtx?.dialect;
-      if (!projectDialect) return { ok: false, error: 'Project not connected: ' + project };
-      const projectSchemas = Array.isArray(projectCtx?.schemas) ? projectCtx.schemas : [];
-      if (!projectSchemas.length) return { ok: false, error: 'No schemas loaded. Upload schemas first (Step 1).' };
       try {
+        const fs = await import('fs');
+        const schemaFile = 'schemas/' + project + '.json';
+
+        // Load schemas from file if not in memory
+        let projectCtx = pm.getProject(project);
+        let projectSchemas = Array.isArray(projectCtx?.schemas) ? projectCtx!.schemas : [];
+        if (!projectSchemas.length && fs.existsSync(schemaFile)) {
+          const fileSchemas = JSON.parse(fs.readFileSync(schemaFile, 'utf-8'));
+          await pm.updateProject(project, { schemas: fileSchemas });
+          projectCtx = pm.getProject(project);
+          projectSchemas = Array.isArray(projectCtx?.schemas) ? projectCtx!.schemas : [];
+        }
+        if (!projectSchemas.length) {
+          return { ok: false, error: 'No schemas found. Upload schemas first (Step 1).' };
+        }
+
+        const projectDialect = projectCtx?.dialect;
+        if (!projectDialect) {
+          // DB might not exist yet
+          return { ok: false, error: 'Database not connected. Create the database first.', needsCreateDb: true };
+        }
+
         await projectDialect.initSchema(projectSchemas);
         const tables = projectSchemas.map((s: EntitySchema) => s.collection);
         console.log(`  [${project}] Step 2/3: ${tables.length} tables applied`);
         return { ok: true, step: 2, message: tables.length + ' tables created/updated', tables };
       } catch (e: unknown) {
-        return { ok: false, error: e instanceof Error ? e.message : 'Schema apply failed' };
+        const msg = e instanceof Error ? e.message : 'Schema apply failed';
+        // Detect "database does not exist" error
+        if (msg.includes('does not exist') || msg.includes('n\'existe pas')) {
+          return { ok: false, error: 'Database "' + project + '" does not exist. Create it first.', needsCreateDb: true };
+        }
+        return { ok: false, error: msg };
       }
     }
 
@@ -409,8 +430,27 @@ async function doApplySchema(){
     if(data.ok){
       s2.textContent='✅ '+data.message;s2.style.color='#6ee7b7';
       document.getElementById('btnSave').disabled=false;
+    }else if(data.needsCreateDb){
+      // Propose to create DB
+      s2.style.color='#f59e0b';
+      s2.innerHTML='⚠️ '+data.error+' <button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#22c55e;margin-left:.5rem" onclick="doCreateDbThenApply()">Creer la base</button>';
+      document.getElementById('btnApply').disabled=false;
     }else{s2.textContent='❌ '+(data.error||data.message);s2.style.color='#f87171';document.getElementById('btnApply').disabled=false;}
   }catch(e){s2.textContent='❌ '+e.message;s2.style.color='#f87171';document.getElementById('btnApply').disabled=false;}
+}
+
+async function doCreateDbThenApply(){
+  const s2=document.getElementById('step2Status');
+  s2.textContent='Creation de la base...';s2.style.color='#94a3b8';
+  try{
+    const res=await fetch(BASE+'/'+PROJECT+'/api/create-database',{method:'POST'});
+    const data=await res.json();
+    if(data.ok){
+      s2.textContent='✅ Base creee — application du schema...';s2.style.color='#6ee7b7';
+      // Now apply schema
+      await doApplySchema();
+    }else{s2.textContent='❌ '+(data.error||'Creation echouee');s2.style.color='#f87171';}
+  }catch(e){s2.textContent='❌ '+e.message;s2.style.color='#f87171';}
 }
 
 async function doSaveConfig(){
