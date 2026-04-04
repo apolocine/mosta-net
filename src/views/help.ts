@@ -135,10 +135,7 @@ export function getHelpTabHtml(port: number): string {
     "name": "myapp",
     "dialect": "postgres",
     "uri": "postgresql://user:pass@localhost:5432/mydb",
-    "schemas": [
-      {"name":"User","collection":"users","fields":{"email":{"type":"string","required":true},"name":{"type":"string"}},"relations":{},"indexes":[]},
-      {"name":"Product","collection":"products","fields":{"title":{"type":"string","required":true},"price":{"type":"number"}},"relations":{},"indexes":[]}
-    ]
+    "schemas": [...]
   }'</pre>
 
       <h4 style="color:#e2e8f0;font-size:.85rem;margin-top:1rem">Endpoints du projet</h4>

@@ -22,6 +22,7 @@ import { McpTransport } from './transports/mcp.transport.js';
 import { TrpcTransport } from './transports/trpc.transport.js';
 import { ODataTransport } from './transports/odata.transport.js';
 import { getHelpTabHtml, getHelpTabScript } from './views/help.js';
+import { registerProjectRoutes } from './routes/project.js';
 import { GrpcTransport } from './transports/grpc.transport.js';
 import { NatsTransport } from './transports/nats.transport.js';
 import { ArrowFlightTransport } from './transports/arrow.transport.js';
@@ -943,13 +944,25 @@ ${C.cyan}└──────────────────────�
 
   app.get('/api/projects', async () => {
     const list = pm.listProjects();
-    // Enrich with uriMasked from ProjectContext
+    const { readFileSync, existsSync } = await import('fs');
+    const { resolve: resolvePath } = await import('path');
+    // Read projects-tree.json for persisted config (uri, strategy, description)
+    const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+    let tree: Record<string, any> = {};
+    try { tree = JSON.parse(readFileSync(treePath, 'utf-8')); } catch {}
+    // Enrich with ProjectContext + persisted config
     return list.map((p: any) => {
       const ctx = pm.getProject(p.name);
+      const conf = tree[p.name] || {};
       return {
         ...p,
         uriMasked: ctx?.uriMasked || '',
         dialectType: ctx?.dialectType || p.dialect,
+        poolMin: ctx?.pool?.min ?? conf.pool?.min ?? 0,
+        schemaStrategy: conf.schemaStrategy || 'update',
+        description: conf.description || '',
+        showSql: conf.showSql ?? false,
+        formatSql: conf.formatSql ?? false,
       };
     });
   });
@@ -1198,219 +1211,8 @@ ${C.cyan}└──────────────────────�
     } catch { reply.status(404); return 'Logo not found'; }
   });
 
-  // 8g. Project namespace routing — /:project/*
-  const RESERVED_NAMES = new Set(['api','mcp','graphql','ws','events','rpc','trpc','odata','health','_admin','arrow','nats','default','logo.png']);
-
-  // Helper: handle REST for a specific project
-  async function handleProjectRest(projectName: string, collection: string, req: any, reply: any) {
-    const projectInfo = pm.getProject(projectName);
-    if (!projectInfo) return reply.code(404).send({ error: 'Project not found: ' + projectName });
-    const projectDialect = projectInfo.dialect;
-    if (!projectDialect) return reply.code(503).send({ error: 'Project not connected: ' + projectName });
-    const schema = (projectInfo.schemas || []).find((s: EntitySchema) => s.collection === collection || s.name.toLowerCase() === collection.toLowerCase());
-    if (!schema) return reply.code(404).send({ error: 'Collection not found: ' + collection + ' in project ' + projectName });
-
-    const method = req.method.toUpperCase();
-    const url = req.url as string;
-    const parts = url.split('/').filter(Boolean);
-    // Extract ID if present: /:project/api/v1/:collection/:id
-    const collIdx = parts.indexOf(collection);
-    const id = parts[collIdx + 1] || null;
-    const body = req.body as Record<string, unknown> | undefined;
-
-    // Parse query params
-    const urlObj = new URL(url, 'http://localhost');
-    const query: Record<string, string> = {};
-    urlObj.searchParams.forEach((v, k) => { query[k] = v; });
-    const filter = query.filter ? JSON.parse(query.filter) : undefined;
-    const limit = query.limit ? parseInt(query.limit) : undefined;
-    const skip = query.skip ? parseInt(query.skip) : undefined;
-    const sort = query.sort ? JSON.parse(query.sort) : undefined;
-
-    const ormReq: OrmRequest = { entity: schema.name, op: 'findAll' };
-    if (method === 'GET' && !id) { ormReq.op = 'findAll'; if (filter) ormReq.filter = filter; if (limit || skip || sort) ormReq.options = { limit, skip, sort }; }
-    else if (method === 'GET' && id === 'count') { ormReq.op = 'count'; if (filter) ormReq.filter = filter; }
-    else if (method === 'GET' && id === 'one') { ormReq.op = 'findOne'; if (filter) ormReq.filter = filter; }
-    else if (method === 'GET' && id === 'search') { ormReq.op = 'search'; ormReq.query = query.q || query.query || ''; if (limit) ormReq.options = { limit }; }
-    else if (method === 'GET' && id) { ormReq.op = 'findById'; ormReq.id = id; }
-    else if (method === 'POST') { ormReq.op = 'create'; ormReq.data = body; }
-    else if (method === 'PUT' && id) { ormReq.op = 'update'; ormReq.id = id; ormReq.data = body; }
-    else if (method === 'DELETE' && id) { ormReq.op = 'delete'; ormReq.id = id; }
-
-    const ctx: TransportContext = { transport: 'rest', projectName };
-    try {
-      const result = await ormHandler(ormReq, ctx);
-      return result;
-    } catch (e: unknown) {
-      return reply.code(500).send({ error: e instanceof Error ? e.message : 'Internal error' });
-    }
-  }
-
-  // Helper: handle MCP for a specific project (tools non-prefixed, scoped to project)
-  async function handleProjectMcp(projectName: string, req: any, reply: any) {
-    const projectInfo = pm.getProject(projectName);
-    if (!projectInfo) return reply.code(404).send({ error: 'Project not found: ' + projectName });
-    const projectSchemas = projectInfo.schemas || [];
-    if (!projectSchemas.length) return reply.code(404).send({ error: 'No schemas for project: ' + projectName });
-
-    // Create a dedicated MCP transport for this project (tools non-prefixed)
-    const projectMcp = new McpTransport();
-    projectMcp.setHandler(async (ormReq, ctx) => {
-      ctx.projectName = projectName;
-      return ormHandler(ormReq, ctx);
-    });
-    for (const s of projectSchemas) projectMcp.registerEntity(s);
-    await projectMcp.start({ enabled: true, port: 0, path: '/' + projectName + '/mcp' });
-
-    reply.type('text/event-stream');
-    const rawReq = req.raw;
-    const rawRes = reply.raw;
-    rawRes.setHeader('Content-Type', 'text/event-stream');
-    rawRes.setHeader('Cache-Control', 'no-cache');
-    rawRes.setHeader('Access-Control-Allow-Origin', '*');
-    rawRes.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, mcp-session-id');
-    await projectMcp.handleRequest(rawReq, rawRes, req.body);
-  }
-
-  // Catch-all route: /:project/...
-  app.all('/:project/*', async (req, reply) => {
-    const project = (req.params as any).project as string;
-    if (RESERVED_NAMES.has(project)) return; // Let Fastify handle normally
-
-    const projectInfo = pm.getProject(project);
-    if (!projectInfo) return reply.code(404).send({ error: 'Project not found: ' + project });
-
-    const fullUrl = req.url as string;
-    const subpath = fullUrl.substring(('/' + project).length);
-
-    // Health: /:project/health — NetHealthResponse format for @mostajs/setup
-    if (subpath === '/health') {
-      const projectSchemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
-      const enabledTransportNames = Object.entries(process.env)
-        .filter(([k, v]) => k.startsWith('MOSTA_NET_') && k.endsWith('_ENABLED') && v === 'true')
-        .map(([k]) => k.replace('MOSTA_NET_', '').replace('_ENABLED', '').toLowerCase());
-      return {
-        status: 'ok',
-        project,
-        transports: enabledTransportNames,
-        entities: projectSchemas.map((s: EntitySchema) => s.name),
-      };
-    }
-
-    // API: /:project/api/test-connection
-    if (subpath === '/api/test-connection') {
-      const projectDialect = projectInfo.dialect;
-      if (!projectDialect) return { ok: false, message: 'Project not connected: ' + project };
-      try {
-        return { ok: true, message: 'Connected to ' + project };
-      } catch (e: unknown) {
-        return { ok: false, message: e instanceof Error ? e.message : 'Connection failed' };
-      }
-    }
-
-    // API: /:project/api/schemas-config
-    if (subpath === '/api/schemas-config') {
-      const projectSchemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
-      return {
-        schemasJsonExists: projectSchemas.length > 0,
-        schemaCount: projectSchemas.length,
-        schemas: projectSchemas.map((s: EntitySchema) => ({ name: s.name, collection: s.collection })),
-      };
-    }
-
-    // API: /:project/api/apply-schema
-    if (subpath === '/api/apply-schema' && req.method === 'POST') {
-      const projectDialect = projectInfo.dialect;
-      if (!projectDialect) return { ok: false, message: 'Project not connected' };
-      const projectSchemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
-      try {
-        await projectDialect.initSchema(projectSchemas);
-        return { ok: true, message: projectSchemas.length + ' schemas applied', tables: projectSchemas.map((s: EntitySchema) => s.collection) };
-      } catch (e: unknown) {
-        return { ok: false, message: e instanceof Error ? e.message : 'Schema apply failed' };
-      }
-    }
-
-    // API: /:project/api/upload-schemas-json
-    if (subpath === '/api/upload-schemas-json' && req.method === 'POST') {
-      const body = req.body as { schemas?: any[] };
-      if (!body?.schemas?.length) return { ok: false, error: 'No schemas provided' };
-      try {
-        // Update project with new schemas
-        await pm.updateProject(project, { schemas: body.schemas });
-        const projectDialect = pm.getProject(project)?.dialect;
-        if (projectDialect) {
-          await projectDialect.initSchema(body.schemas);
-        }
-        // Save schemas/{projectName}.json
-        const fs = await import('fs');
-        const { resolve: resolvePath } = await import('path');
-        if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
-        const fileName = 'schemas/' + project + '.json';
-        fs.writeFileSync(fileName, JSON.stringify(body.schemas, null, 2));
-        // Update projects-tree.json to reference the schema file (persists across restarts)
-        const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
-        try {
-          const tree = JSON.parse(fs.readFileSync(treePath, 'utf-8'));
-          if (tree[project]) {
-            tree[project].schemas = fileName;
-            fs.writeFileSync(treePath, JSON.stringify(tree, null, 2));
-          }
-        } catch {}
-        console.log(`  schemas ${project}: ${body.schemas.length} schemas saved to ${fileName}`);
-        return { ok: true, count: body.schemas.length, file: fileName, schemas: body.schemas.map((s: any) => s.name) };
-      } catch (e: unknown) {
-        return { ok: false, error: e instanceof Error ? e.message : 'Upload failed' };
-      }
-    }
-
-    // API: /:project/api/create-database — forward to global endpoint with project context
-    if (subpath === '/api/create-database' && req.method === 'POST') {
-      // Project DB creation is handled at project add time by mproject
-      return { ok: true, message: 'Use the Projects tab to create/configure the database for ' + project };
-    }
-
-    // REST: /:project/api/v1/:collection[/:id]
-    if (subpath.startsWith('/api/v1/')) {
-      const rest = subpath.replace('/api/v1/', '');
-      const collection = rest.split('/')[0];
-      return handleProjectRest(project, collection, req, reply);
-    }
-
-    // MCP: /:project/mcp
-    if (subpath === '/mcp' || subpath.startsWith('/mcp')) {
-      return handleProjectMcp(project, req, reply);
-    }
-
-    // GraphQL: /:project/graphql — forward to main graphql with project header
-    if (subpath === '/graphql' || subpath.startsWith('/graphql')) {
-      req.headers['x-project'] = project;
-      return reply.redirect('/graphql');
-    }
-
-    // Dashboard: /:project/ — show project info
-    if (subpath === '/' || subpath === '') {
-      reply.type('text/html');
-      return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${project} — OctoNet</title>
-        <style>body{font-family:sans-serif;background:#0f172a;color:#e2e8f0;padding:2rem;max-width:800px;margin:0 auto}
-        h1{color:#38bdf8}a{color:#38bdf8}code{background:#1e293b;padding:.1rem .3rem;border-radius:3px;font-size:.85rem}
-        .card{background:#1e293b;border-radius:8px;padding:1rem;margin:.5rem 0}pre{background:#0f172a;padding:.75rem;border-radius:6px;font-size:.8rem;overflow:auto}</style></head><body>
-        <h1>${project}</h1>
-        <p style="color:#94a3b8">${projectInfo.dialect} — ${(projectInfo.schemas||[]).length} schemas</p>
-        <div class="card"><h3 style="color:#38bdf8;margin-top:0">Endpoints</h3>
-        <ul style="line-height:2">${(projectInfo.schemas||[]).map((s: EntitySchema) =>
-          '<li><a href="/' + project + '/api/v1/' + s.collection + '">/' + project + '/api/v1/' + s.collection + '</a> (' + s.name + ')</li>'
-        ).join('')}
-        <li><a href="/${project}/mcp">/${project}/mcp</a> (MCP)</li>
-        </ul></div>
-        <div class="card"><h3 style="color:#38bdf8;margin-top:0">Claude Desktop</h3>
-        <pre>{"mcpServers":{"${project}":{"url":"${req.protocol}://${req.hostname}/${project}/mcp"}}}</pre></div>
-        <p><a href="/">← Retour au dashboard</a></p>
-        </body></html>`;
-    }
-
-    return reply.code(404).send({ error: 'Unknown endpoint: ' + subpath + ' for project ' + project });
-  });
+  // 8g. Project namespace routing — /:project/* (externalized in src/routes/project.ts)
+  registerProjectRoutes(app, pm, ormHandler);
 
   // 8h. Home page — net dashboard
   app.get('/', async (req, reply) => {
@@ -2604,7 +2406,7 @@ async function editProject(name){
     const projects=await res.json();
     const p=projects.find(pr=>pr.name===name);
     if(!p)return alert('Projet non trouve');
-    // Open the form and fill all fields
+    // Open the form and fill ALL fields
     document.getElementById('addProjectForm').open=true;
     document.getElementById('pName').value=p.name;
     document.getElementById('pName').disabled=true;
@@ -2613,8 +2415,13 @@ async function editProject(name){
     document.getElementById('pUri').value=p.uriMasked||'';
     document.getElementById('pUri').placeholder=p.uriMasked||'Entrez l\\'URI de connexion';
     document.getElementById('pDesc').value=p.description||'';
-    document.getElementById('pSchemasJson').value=p.schemas?JSON.stringify(p.schemas):'';
-    if(p.poolMax){document.getElementById('pPoolMax').value=p.poolMax;}
+    document.getElementById('pStrategy').value=p.schemaStrategy||'update';
+    document.getElementById('pShowSql').value=p.showSql?'true':'false';
+    document.getElementById('pFormatSql').value=p.formatSql?'true':'false';
+    document.getElementById('pPoolMin').value=p.poolMin||2;
+    document.getElementById('pPoolMax').value=p.poolMax||20;
+    document.getElementById('pPoolSize').value=p.poolMax||10;
+    document.getElementById('pSchemasJson').value=p.schemasCount>0?(p.schemasCount+' schemas charges — re-uploadez pour modifier'):'';
     editingProject=name;
     document.getElementById('pSubmitBtn').textContent='Modifier le projet';
     document.getElementById('pStatus').textContent='Mode modification: '+name;
