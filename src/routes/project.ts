@@ -337,7 +337,7 @@ async function doApplySchema(){
   s2.textContent='Application...';s2.style.color='#94a3b8';
   document.getElementById('btnApply').disabled=true;
   try{
-    const res=await fetch(BASE+'/'+PROJECT+'/api/apply-schema',{method:'POST',headers:{'Content-Type':'application/json'}});
+    const res=await fetch(BASE+'/'+PROJECT+'/api/apply-schema',{method:'POST'});
     const data=await res.json();
     if(data.ok){
       s2.textContent='✅ '+data.message;s2.style.color='#6ee7b7';
@@ -351,7 +351,7 @@ async function doSaveConfig(){
   s3.textContent='Enregistrement...';s3.style.color='#94a3b8';
   document.getElementById('btnSave').disabled=true;
   try{
-    const res=await fetch(BASE+'/'+PROJECT+'/api/save-config',{method:'POST',headers:{'Content-Type':'application/json'}});
+    const res=await fetch(BASE+'/'+PROJECT+'/api/save-config',{method:'POST'});
     const data=await res.json();
     if(data.ok){
       s3.textContent='✅ '+data.message;s3.style.color='#6ee7b7';
