@@ -195,6 +195,41 @@ export function registerProjectRoutes(
       }
     }
 
+    // ── Step 4: Seed data (create initial records) ──
+    if (subpath === '/api/seed' && req.method === 'POST') {
+      const body = req.body as { seeds?: Array<{ collection: string; data: Record<string, unknown>[] }> } | null;
+      const projectCtx = pm.getProject(project);
+      if (!projectCtx?.dialect) return { ok: false, error: 'Project not connected: ' + project };
+      const projectSchemas = Array.isArray(projectCtx.schemas) ? projectCtx.schemas : [];
+      if (!projectSchemas.length) return { ok: false, error: 'No schemas. Apply schema first (Step 2).' };
+
+      const seeds = body?.seeds;
+      if (!seeds?.length) return { ok: false, error: 'No seeds provided. Send { seeds: [{ collection: "users", data: [...] }] }' };
+
+      const results: Array<{ collection: string; created: number; error?: string }> = [];
+      for (const seed of seeds) {
+        const schema = projectSchemas.find((s: EntitySchema) => s.collection === seed.collection || s.name.toLowerCase() === seed.collection.toLowerCase());
+        if (!schema) { results.push({ collection: seed.collection, created: 0, error: 'Collection not found' }); continue; }
+        let created = 0;
+        for (const record of seed.data) {
+          try {
+            const ctx: TransportContext = { transport: 'seed', projectName: project };
+            await ormHandler({ entity: schema.name, op: 'create', data: record }, ctx);
+            created++;
+          } catch (e: unknown) {
+            results.push({ collection: seed.collection, created, error: e instanceof Error ? e.message : 'Seed failed' });
+            break;
+          }
+        }
+        if (!results.find(r => r.collection === seed.collection)) {
+          results.push({ collection: seed.collection, created });
+        }
+      }
+      const totalCreated = results.reduce((sum, r) => sum + r.created, 0);
+      console.log(`  [${project}] Step 4: seeded ${totalCreated} records`);
+      return { ok: true, step: 4, message: totalCreated + ' records created', results };
+    }
+
     // ── Create database ──
     if (subpath === '/api/create-database' && req.method === 'POST') {
       try {
@@ -296,10 +331,22 @@ function getProjectDashboardHtml(project: string, projectInfo: any, req: any): s
     <span id="step2Status" style="font-size:.8rem;color:#64748b"></span>
   </div>
 
-  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
     <span style="font-size:.85rem;color:#94a3b8;font-weight:600">Etape 3:</span>
     <button class="btn" style="background:#22c55e" id="btnSave" onclick="doSaveConfig()" disabled>Enregistrer la config</button>
     <span id="step3Status" style="font-size:.8rem;color:#64748b"></span>
+  </div>
+
+  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+    <span style="font-size:.85rem;color:#94a3b8;font-weight:600">Etape 4:</span>
+    <button class="btn" style="background:#6366f1" id="btnSeed" onclick="doSeed()" disabled>Seed (admin)</button>
+    <button class="btn" style="background:#334155;font-size:.7rem" id="btnSeedCustom" onclick="document.getElementById('seedPanel').style.display='block'" disabled>Seed personnalise</button>
+    <span id="step4Status" style="font-size:.8rem;color:#64748b"></span>
+  </div>
+  <div id="seedPanel" style="display:none;margin-top:.5rem">
+    <textarea id="seedJson" rows="6" style="width:100%;font-family:monospace;font-size:.75rem;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:.5rem" placeholder='[{"collection":"users","data":[{"email":"admin@amia.fr","password":"admin123","firstName":"Admin","lastName":"System","status":"active"}]}]'></textarea>
+    <button class="btn" style="background:#6366f1;margin-top:.3rem;font-size:.8rem" onclick="doSeedCustom()">Executer le seed</button>
+    <span id="seedCustomStatus" style="font-size:.8rem;color:#64748b;margin-left:.5rem"></span>
   </div>
 </div>
 
@@ -355,8 +402,49 @@ async function doSaveConfig(){
     const data=await res.json();
     if(data.ok){
       s3.textContent='✅ '+data.message;s3.style.color='#6ee7b7';
+      document.getElementById('btnSeed').disabled=false;
+      document.getElementById('btnSeedCustom').disabled=false;
     }else{s3.textContent='❌ '+(data.error||data.message);s3.style.color='#f87171';document.getElementById('btnSave').disabled=false;}
   }catch(e){s3.textContent='❌ '+e.message;s3.style.color='#f87171';document.getElementById('btnSave').disabled=false;}
+}
+
+// Step 4: Seed admin user
+async function doSeed(){
+  const s4=document.getElementById('step4Status');
+  s4.textContent='Seeding admin...';s4.style.color='#94a3b8';
+  document.getElementById('btnSeed').disabled=true;
+  try{
+    const seeds=[
+      {collection:'roles',data:[
+        {name:'admin',description:'Administrateur systeme'},
+        {name:'user',description:'Utilisateur standard'}
+      ]},
+      {collection:'users',data:[
+        {email:'admin@amia.fr',password:'admin123',firstName:'Admin',lastName:'System',status:'active'}
+      ]}
+    ];
+    const res=await fetch(BASE+'/'+PROJECT+'/api/seed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({seeds})});
+    const data=await res.json();
+    if(data.ok){
+      s4.textContent='✅ '+data.message;s4.style.color='#6ee7b7';
+    }else{s4.textContent='❌ '+(data.error||'Seed failed');s4.style.color='#f87171';document.getElementById('btnSeed').disabled=false;}
+  }catch(e){s4.textContent='❌ '+e.message;s4.style.color='#f87171';document.getElementById('btnSeed').disabled=false;}
+}
+
+// Step 4: Custom seed
+async function doSeedCustom(){
+  const sc=document.getElementById('seedCustomStatus');
+  const raw=document.getElementById('seedJson').value.trim();
+  if(!raw){sc.textContent='JSON requis';sc.style.color='#f87171';return;}
+  sc.textContent='Seeding...';sc.style.color='#94a3b8';
+  try{
+    const seeds=JSON.parse(raw);
+    const res=await fetch(BASE+'/'+PROJECT+'/api/seed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({seeds:Array.isArray(seeds)?seeds:[seeds]})});
+    const data=await res.json();
+    if(data.ok){
+      sc.textContent='✅ '+data.message;sc.style.color='#6ee7b7';
+    }else{sc.textContent='❌ '+(data.error||'Seed failed');sc.style.color='#f87171';}
+  }catch(e){sc.textContent='❌ '+e.message;sc.style.color='#f87171';}
 }
 </script>
 </body></html>`;
