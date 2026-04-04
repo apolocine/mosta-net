@@ -2366,8 +2366,8 @@ async function addProject(){
   const batchSize=parseInt(document.getElementById('pBatchSize').value)||100;
   const schemasRaw=document.getElementById('pSchemasJson').value.trim();
   const st=document.getElementById('pStatus');
-  if(!name||!uri){st.textContent='Nom et URI requis';st.style.color='#f87171';return;}
   const isEdit=!!editingProject;
+  if(!name||(!uri&&!isEdit)){st.textContent='Nom et URI requis';st.style.color='#f87171';return;}
   st.textContent=isEdit?'Modification en cours...':'Ajout en cours...';st.style.color='#94a3b8';
   // Parse schemas
   let schemas=undefined;
@@ -2376,7 +2376,9 @@ async function addProject(){
   } else if(schemasRaw&&!schemasRaw.startsWith('[')){
     schemas=schemasRaw; // path string
   }
-  const body={name,dialect,uri,description:desc,schemaStrategy:strategy,showSql,formatSql,pool:{min:poolMin,max:poolMax},poolSize,batchSize};
+  const body={name,dialect,description:desc,schemaStrategy:strategy,showSql,formatSql,pool:{min:poolMin,max:poolMax},poolSize,batchSize};
+  // Only send URI if user entered a new one (not masked)
+  if(uri&&!uri.includes('***'))body.uri=uri;
   if(schemas)body.schemas=schemas;
   try{
     const url=isEdit?BASE+'/api/projects/'+encodeURIComponent(editingProject):BASE+'/api/projects';
