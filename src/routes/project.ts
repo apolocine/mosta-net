@@ -124,7 +124,17 @@ export function registerProjectRoutes(
 
     // ── Health ──
     if (subpath === '/health') {
-      const projectSchemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
+      let projectSchemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
+      // Fallback: read from schema file if not in memory
+      if (!projectSchemas.length) {
+        try {
+          const fs = await import('fs');
+          const schemaFile = 'schemas/' + project + '.json';
+          if (fs.existsSync(schemaFile)) {
+            projectSchemas = JSON.parse(fs.readFileSync(schemaFile, 'utf-8'));
+          }
+        } catch {}
+      }
       const enabledTransportNames = Object.entries(process.env)
         .filter(([k, v]) => k.startsWith('MOSTA_NET_') && k.endsWith('_ENABLED') && v === 'true')
         .map(([k]) => k.replace('MOSTA_NET_', '').replace('_ENABLED', '').toLowerCase());
