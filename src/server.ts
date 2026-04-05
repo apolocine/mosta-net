@@ -1001,9 +1001,38 @@ ${C.cyan}└──────────────────────�
 
   app.put('/api/projects/:name', async (req, reply) => {
     const { name } = req.params as { name: string };
-    const body = req.body as Partial<ProjectConfig>;
+    const body = req.body as Record<string, unknown>;
     try {
-      await pm.updateProject(name, body);
+      // Update in-memory (only ProjectConfig fields)
+      const pmUpdate: any = {};
+      if (body.dialect) pmUpdate.dialect = body.dialect;
+      if (body.uri) pmUpdate.uri = body.uri;
+      if (body.schemas) pmUpdate.schemas = body.schemas;
+      if (body.pool) pmUpdate.pool = body.pool;
+      if (body.schemaStrategy) pmUpdate.schemaStrategy = body.schemaStrategy;
+      if (Object.keys(pmUpdate).length > 0) {
+        await pm.updateProject(name, pmUpdate);
+      }
+      // Persist ALL fields to projects-tree.json (including description, showSql, etc.)
+      const { readFileSync, writeFileSync, existsSync } = await import('fs');
+      const { resolve: resolvePath } = await import('path');
+      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      const tree = existsSync(treePath) ? JSON.parse(readFileSync(treePath, 'utf-8')) : {};
+      if (!tree[name]) tree[name] = {};
+      // Merge all fields except 'name'
+      for (const [k, v] of Object.entries(body)) {
+        if (k === 'name') continue;
+        if (v !== undefined && v !== null && v !== '') tree[name][k] = v;
+      }
+      // Save schemas as file if array
+      if (Array.isArray(body.schemas) && (body.schemas as any[]).length > 0) {
+        const fs = await import('fs');
+        if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
+        const schemaFile = 'schemas/' + name + '.json';
+        fs.writeFileSync(schemaFile, JSON.stringify(body.schemas, null, 2));
+        tree[name].schemas = schemaFile;
+      }
+      writeFileSync(treePath, JSON.stringify(tree, null, 2));
       return { ok: true, projects: pm.listProjects() };
     } catch (e: unknown) {
       reply.status(400);
@@ -1013,12 +1042,24 @@ ${C.cyan}└──────────────────────�
 
   app.delete('/api/projects/:name', async (req, reply) => {
     const { name } = req.params as { name: string };
+    const query = req.query as Record<string, string>;
+    const deleteSchema = query.deleteSchema === 'true';
+    const deleteDb = query.deleteDb === 'true';
     try {
-      await pm.removeProject(name);
-      // Remove from projects-tree.json
-      const { readFileSync, writeFileSync, existsSync } = await import('fs');
+      // Read config before removing (need URI for drop DB)
+      const { readFileSync, writeFileSync, existsSync, unlinkSync } = await import('fs');
       const { resolve: resolvePath } = await import('path');
       const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      let projConf: any = null;
+      if (existsSync(treePath)) {
+        try { projConf = JSON.parse(readFileSync(treePath, 'utf-8'))[name]; } catch {}
+      }
+
+      await pm.removeProject(name);
+
+      // Remove from projects-tree.json
+      let schemaDeleted = false;
+      let dbDropped = false;
       if (existsSync(treePath)) {
         try {
           const tree = JSON.parse(readFileSync(treePath, 'utf-8'));
@@ -1028,7 +1069,27 @@ ${C.cyan}└──────────────────────�
           }
         } catch {}
       }
-      return { ok: true, projects: pm.listProjects() };
+
+      // Delete schema file
+      if (deleteSchema) {
+        const schemaFile = resolvePath(process.cwd(), 'schemas/' + name + '.json');
+        if (existsSync(schemaFile)) {
+          unlinkSync(schemaFile);
+          schemaDeleted = true;
+        }
+      }
+
+      // Drop database (uses @mostajs/orm dropDatabase)
+      if (deleteDb && projConf?.dialect && projConf?.uri) {
+        try {
+          const { dropDatabase } = await import('@mostajs/orm');
+          const dbName = projConf.uri.split('/').pop()?.split('?')[0] || name;
+          const result = await dropDatabase(projConf.dialect, projConf.uri, dbName);
+          dbDropped = result.ok;
+        } catch {}
+      }
+
+      return { ok: true, schemaDeleted, dbDropped, projects: pm.listProjects() };
     } catch (e: unknown) {
       reply.status(404);
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -2464,8 +2525,24 @@ async function editProject(name){
   }catch(e){alert(e.message);}
 }
 async function deleteProject(name){
-  if(!confirm('Supprimer le projet "'+name+'" ?'))return;
-  try{await fetch(BASE+'/api/projects/'+name,{method:'DELETE'});loadProjects();}catch(e){alert(e.message);}
+  const deleteSchema=confirm('Supprimer le projet "'+name+'" ?\\n\\nSupprimer aussi le fichier schemas/'+name+'.json ?');
+  if(!deleteSchema&&!confirm('Supprimer le projet "'+name+'" (sans le fichier schema) ?'))return;
+  const deleteDb=confirm('Supprimer aussi la base de donnees "'+name+'" ?\\n\\n⚠️ Cette action est irreversible !');
+  try{
+    const params=new URLSearchParams();
+    if(deleteSchema)params.set('deleteSchema','true');
+    if(deleteDb)params.set('deleteDb','true');
+    const res=await fetch(BASE+'/api/projects/'+name+'?'+params.toString(),{method:'DELETE'});
+    const data=await res.json();
+    if(data.ok){
+      let msg='✅ Projet "'+name+'" supprime';
+      if(data.schemaDeleted)msg+='\\n📄 Fichier schema supprime';
+      if(data.dbDropped)msg+='\\n💾 Base de donnees supprimee';
+      alert(msg);
+    }else{alert('❌ '+(data.error||'Erreur'));}
+    loadProjects();
+    loadGlobalProjectDropdown();
+  }catch(e){alert(e.message);}
 }
 async function testProject(name){
   try{
