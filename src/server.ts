@@ -975,6 +975,23 @@ ${C.cyan}└──────────────────────�
     }
     try {
       await pm.addProject(body);
+      // Persist to projects-tree.json
+      const { readFileSync, writeFileSync, existsSync } = await import('fs');
+      const { resolve: resolvePath } = await import('path');
+      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      const tree = existsSync(treePath) ? JSON.parse(readFileSync(treePath, 'utf-8')) : {};
+      const { name, ...config } = body;
+      // Save schemas as file path reference if schemas are an array
+      if (Array.isArray(config.schemas) && config.schemas.length > 0) {
+        const fs = await import('fs');
+        if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
+        const schemaFile = 'schemas/' + name + '.json';
+        fs.writeFileSync(schemaFile, JSON.stringify(config.schemas, null, 2));
+        tree[name] = { ...config, schemas: schemaFile };
+      } else {
+        tree[name] = config;
+      }
+      writeFileSync(treePath, JSON.stringify(tree, null, 2));
       return { ok: true, projects: pm.listProjects() };
     } catch (e: unknown) {
       reply.status(400);
@@ -998,6 +1015,19 @@ ${C.cyan}└──────────────────────�
     const { name } = req.params as { name: string };
     try {
       await pm.removeProject(name);
+      // Remove from projects-tree.json
+      const { readFileSync, writeFileSync, existsSync } = await import('fs');
+      const { resolve: resolvePath } = await import('path');
+      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      if (existsSync(treePath)) {
+        try {
+          const tree = JSON.parse(readFileSync(treePath, 'utf-8'));
+          if (tree[name]) {
+            delete tree[name];
+            writeFileSync(treePath, JSON.stringify(tree, null, 2));
+          }
+        } catch {}
+      }
       return { ok: true, projects: pm.listProjects() };
     } catch (e: unknown) {
       reply.status(404);
