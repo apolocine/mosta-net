@@ -362,7 +362,7 @@ function getProjectDashboardHtml(project: string, projectInfo: any, req: any): s
   </ul>
 </div>
 
-<!-- Steps: Upload → Apply → Save -->
+<!-- Steps: Upload → Save → Apply → Seed -->
 <h2>Configuration du projet</h2>
 <div class="card">
   <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
@@ -376,13 +376,13 @@ function getProjectDashboardHtml(project: string, projectInfo: any, req: any): s
 
   <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
     <span style="font-size:.85rem;color:#94a3b8;font-weight:600">Etape 2:</span>
-    <button class="btn" style="background:#f59e0b;color:#000" id="btnApply" onclick="doApplySchema()" ${schemasCount > 0 ? '' : 'disabled'}>Appliquer le schema</button>
+    <button class="btn" style="background:#22c55e" id="btnSave" onclick="doSaveConfig()" ${schemasCount > 0 ? '' : 'disabled'}>Enregistrer la config</button>
     <span id="step2Status" style="font-size:.8rem;color:#64748b"></span>
   </div>
 
   <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
     <span style="font-size:.85rem;color:#94a3b8;font-weight:600">Etape 3:</span>
-    <button class="btn" style="background:#22c55e" id="btnSave" onclick="doSaveConfig()" disabled>Enregistrer la config</button>
+    <button class="btn" style="background:#f59e0b;color:#000" id="btnApply" onclick="doApplySchema()" disabled>Appliquer le schema</button>
     <span id="step3Status" style="font-size:.8rem;color:#64748b"></span>
   </div>
 
@@ -423,57 +423,55 @@ async function doUploadSchemas(input){
     const data=await res.json();
     if(data.ok){
       s1.textContent='✅ '+data.count+' schemas uploades ('+data.file+')';s1.style.color='#6ee7b7';
-      document.getElementById('btnApply').disabled=false;
+      document.getElementById('btnSave').disabled=false;
     }else{s1.textContent='❌ '+data.error;s1.style.color='#f87171';}
   }catch(e){s1.textContent='❌ '+e.message;s1.style.color='#f87171';}
 }
 
 async function doApplySchema(){
-  const s2=document.getElementById('step2Status');
-  s2.textContent='Application...';s2.style.color='#94a3b8';
+  const s3=document.getElementById('step3Status');
+  s3.textContent='Application...';s3.style.color='#94a3b8';
   document.getElementById('btnApply').disabled=true;
   try{
     const res=await fetch(BASE+'/'+PROJECT+'/api/apply-schema',{method:'POST'});
     const data=await res.json();
     if(data.ok){
-      s2.textContent='✅ '+data.message;s2.style.color='#6ee7b7';
-      document.getElementById('btnSave').disabled=false;
+      s3.textContent='✅ '+data.message;s3.style.color='#6ee7b7';
+      document.getElementById('btnSeed').disabled=false;
+      document.getElementById('btnSeedCustom').disabled=false;
     }else if(data.needsCreateDb){
-      // Propose to create DB
-      s2.style.color='#f59e0b';
-      s2.innerHTML='⚠️ '+data.error+' <button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#22c55e;margin-left:.5rem" onclick="doCreateDbThenApply()">Creer la base</button>';
+      s3.style.color='#f59e0b';
+      s3.innerHTML='⚠️ '+data.error+' <button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#22c55e;margin-left:.5rem" onclick="doCreateDbThenApply()">Creer la base</button>';
       document.getElementById('btnApply').disabled=false;
-    }else{s2.textContent='❌ '+(data.error||data.message);s2.style.color='#f87171';document.getElementById('btnApply').disabled=false;}
-  }catch(e){s2.textContent='❌ '+e.message;s2.style.color='#f87171';document.getElementById('btnApply').disabled=false;}
+    }else{s3.textContent='❌ '+(data.error||data.message);s3.style.color='#f87171';document.getElementById('btnApply').disabled=false;}
+  }catch(e){s3.textContent='❌ '+e.message;s3.style.color='#f87171';document.getElementById('btnApply').disabled=false;}
 }
 
 async function doCreateDbThenApply(){
-  const s2=document.getElementById('step2Status');
-  s2.textContent='Creation de la base...';s2.style.color='#94a3b8';
+  const s3=document.getElementById('step3Status');
+  s3.textContent='Creation de la base...';s3.style.color='#94a3b8';
   try{
     const res=await fetch(BASE+'/'+PROJECT+'/api/create-database',{method:'POST'});
     const data=await res.json();
     if(data.ok){
-      s2.textContent='✅ Base creee — application du schema...';s2.style.color='#6ee7b7';
-      // Now apply schema
+      s3.textContent='✅ Base creee — application du schema...';s3.style.color='#6ee7b7';
       await doApplySchema();
-    }else{s2.textContent='❌ '+(data.error||'Creation echouee');s2.style.color='#f87171';}
-  }catch(e){s2.textContent='❌ '+e.message;s2.style.color='#f87171';}
+    }else{s3.textContent='❌ '+(data.error||'Creation echouee');s3.style.color='#f87171';}
+  }catch(e){s3.textContent='❌ '+e.message;s3.style.color='#f87171';}
 }
 
 async function doSaveConfig(){
-  const s3=document.getElementById('step3Status');
-  s3.textContent='Enregistrement...';s3.style.color='#94a3b8';
+  const s2=document.getElementById('step2Status');
+  s2.textContent='Enregistrement...';s2.style.color='#94a3b8';
   document.getElementById('btnSave').disabled=true;
   try{
     const res=await fetch(BASE+'/'+PROJECT+'/api/save-config',{method:'POST'});
     const data=await res.json();
     if(data.ok){
-      s3.textContent='✅ '+data.message;s3.style.color='#6ee7b7';
-      document.getElementById('btnSeed').disabled=false;
-      document.getElementById('btnSeedCustom').disabled=false;
-    }else{s3.textContent='❌ '+(data.error||data.message);s3.style.color='#f87171';document.getElementById('btnSave').disabled=false;}
-  }catch(e){s3.textContent='❌ '+e.message;s3.style.color='#f87171';document.getElementById('btnSave').disabled=false;}
+      s2.textContent='✅ '+data.message;s2.style.color='#6ee7b7';
+      document.getElementById('btnApply').disabled=false;
+    }else{s2.textContent='❌ '+(data.error||data.message);s2.style.color='#f87171';document.getElementById('btnSave').disabled=false;}
+  }catch(e){s2.textContent='❌ '+e.message;s2.style.color='#f87171';document.getElementById('btnSave').disabled=false;}
 }
 
 // Step 4: Seed admin user
