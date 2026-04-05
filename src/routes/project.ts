@@ -281,6 +281,119 @@ export function registerProjectRoutes(
       return { ok: true, step: 4, message: totalCreated + ' records created', results };
     }
 
+    // ── Seed from file (full format: { rbac: {...}, seeds: [...] }) ──
+    if (subpath === '/api/seed-file' && req.method === 'POST') {
+      const body = req.body as { rbac?: any; seeds?: any[] } | null;
+      if (!body) return { ok: false, error: 'No body provided' };
+      const projectCtx = pm.getProject(project);
+      if (!projectCtx?.dialect) return { ok: false, error: 'Project not connected: ' + project };
+      const projectSchemas = Array.isArray(projectCtx.schemas) ? projectCtx.schemas : [];
+      const results: string[] = [];
+
+      try {
+        // 1. RBAC: categories, permissions, roles
+        if (body.rbac) {
+          const rbac = body.rbac;
+          if (rbac.categories?.length) {
+            for (const cat of rbac.categories) {
+              const schema = projectSchemas.find((s: EntitySchema) => s.collection === 'permission_categories' || s.name === 'PermissionCategory');
+              if (!schema) break;
+              const existing = await ormHandler({ entity: schema.name, op: 'findOne', filter: { name: cat.name } }, { transport: 'seed', projectName: project });
+              if (!existing?.data) await ormHandler({ entity: schema.name, op: 'create', data: cat }, { transport: 'seed', projectName: project });
+            }
+            results.push(rbac.categories.length + ' categories');
+          }
+          const permMap: Record<string, string> = {};
+          if (rbac.permissions?.length) {
+            for (const p of rbac.permissions) {
+              const schema = projectSchemas.find((s: EntitySchema) => s.collection === 'permissions' || s.name === 'Permission');
+              if (!schema) break;
+              const name = p.name ?? p.code;
+              const existing = await ormHandler({ entity: schema.name, op: 'findOne', filter: { name } }, { transport: 'seed', projectName: project });
+              if (existing?.data) { permMap[p.code] = (existing.data as any).id; }
+              else {
+                const created = await ormHandler({ entity: schema.name, op: 'create', data: { name, description: p.description, category: p.category } }, { transport: 'seed', projectName: project });
+                if (created?.data) permMap[p.code] = (created.data as any).id;
+              }
+            }
+            results.push(rbac.permissions.length + ' permissions');
+          }
+          if (rbac.roles?.length) {
+            const allPermIds = Object.values(permMap);
+            for (const r of rbac.roles) {
+              const schema = projectSchemas.find((s: EntitySchema) => s.collection === 'roles' || s.name === 'Role');
+              if (!schema) break;
+              const permIds = r.permissions?.includes?.('*') ? allPermIds : (r.permissions || []).map((c: string) => permMap[c]).filter(Boolean);
+              const existing = await ormHandler({ entity: schema.name, op: 'findOne', filter: { name: r.name } }, { transport: 'seed', projectName: project });
+              if (!existing?.data) await ormHandler({ entity: schema.name, op: 'create', data: { name: r.name, description: r.description || '', permissions: permIds } }, { transport: 'seed', projectName: project });
+            }
+            results.push(rbac.roles.length + ' roles');
+          }
+        }
+
+        // 2. Seeds
+        if (body.seeds?.length) {
+          for (const seedDef of body.seeds) {
+            const schema = projectSchemas.find((s: EntitySchema) =>
+              s.collection === seedDef.collection || s.name.toLowerCase() === seedDef.collection.toLowerCase() ||
+              s.name === seedDef.collection || s.collection === seedDef.collection + 's'
+            );
+            if (!schema) { results.push(seedDef.key + ': collection not found'); continue; }
+
+            // Resolve lookupFields
+            const resolved: Record<string, unknown> = {};
+            if (seedDef.lookupFields) {
+              for (const [field, lookup] of Object.entries(seedDef.lookupFields as Record<string, { collection: string; match: string; value: string }>)) {
+                const lookupSchema = projectSchemas.find((s: EntitySchema) => s.name.toLowerCase() === lookup.collection.toLowerCase() || s.collection === lookup.collection + 's' || s.collection === lookup.collection);
+                if (lookupSchema) {
+                  const found = await ormHandler({ entity: lookupSchema.name, op: 'findOne', filter: { [lookup.match]: lookup.value } }, { transport: 'seed', projectName: project });
+                  if (found?.data) resolved[field] = (found.data as any).id;
+                }
+              }
+            }
+
+            let created = 0;
+            for (const rawItem of seedDef.data) {
+              const item = { ...(seedDef.defaults ?? {}), ...resolved, ...rawItem };
+              // Hash password
+              if (seedDef.hashField && item[seedDef.hashField] && typeof item[seedDef.hashField] === 'string' && !String(item[seedDef.hashField]).startsWith('$')) {
+                item[seedDef.hashField] = await hashPassword(String(item[seedDef.hashField]));
+              }
+              // Resolve role name → role ID
+              if (seedDef.roleField && item[seedDef.roleField]) {
+                const roleSchema = projectSchemas.find((s: EntitySchema) => s.name === 'Role' || s.collection === 'roles');
+                if (roleSchema) {
+                  const role = await ormHandler({ entity: roleSchema.name, op: 'findOne', filter: { name: String(item[seedDef.roleField]) } }, { transport: 'seed', projectName: project });
+                  if (role?.data) item.roles = [(role.data as any).id];
+                }
+                delete item[seedDef.roleField];
+              }
+              // Upsert or create
+              try {
+                if (seedDef.match) {
+                  const existing = await ormHandler({ entity: schema.name, op: 'findOne', filter: { [seedDef.match]: item[seedDef.match] } }, { transport: 'seed', projectName: project });
+                  if (existing?.data) {
+                    await ormHandler({ entity: schema.name, op: 'update', id: (existing.data as any).id, data: item }, { transport: 'seed', projectName: project });
+                  } else {
+                    await ormHandler({ entity: schema.name, op: 'create', data: item }, { transport: 'seed', projectName: project });
+                  }
+                } else {
+                  await ormHandler({ entity: schema.name, op: 'create', data: item }, { transport: 'seed', projectName: project });
+                }
+                created++;
+              } catch {}
+            }
+            results.push(seedDef.key + ': ' + created + '/' + seedDef.data.length);
+          }
+        }
+
+        console.log(`  [${project}] Seed file: ${results.join(', ')}`);
+        return { ok: true, message: results.join(', '), results };
+      } catch (e: unknown) {
+        return { ok: false, error: e instanceof Error ? e.message : 'Seed failed' };
+      }
+    }
+
     // ── Create database ──
     if (subpath === '/api/create-database' && req.method === 'POST') {
       try {
@@ -399,11 +512,15 @@ function getProjectDashboardHtml(project: string, projectInfo: any, req: any): s
   <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
     <span style="font-size:.85rem;color:#94a3b8;font-weight:600">Etape 4:</span>
     <button class="btn" style="background:#6366f1" id="btnSeed" onclick="doSeed()" disabled>Seed (admin)</button>
-    <button class="btn" style="background:#334155;font-size:.7rem" id="btnSeedCustom" onclick="document.getElementById('seedPanel').style.display='block'" disabled>Seed personnalise</button>
+    <label class="btn" style="background:#8b5cf6;font-size:.7rem;cursor:pointer" id="btnSeedFile">
+      Upload seed.json
+      <input type="file" id="fileSeed" accept=".json" style="display:none" onchange="doUploadSeed(this)"/>
+    </label>
+    <button class="btn" style="background:#334155;font-size:.7rem" id="btnSeedCustom" onclick="document.getElementById('seedPanel').style.display='block'">Seed personnalise</button>
     <span id="step4Status" style="font-size:.8rem;color:#64748b"></span>
   </div>
   <div id="seedPanel" style="display:none;margin-top:.5rem">
-    <textarea id="seedJson" rows="6" style="width:100%;font-family:monospace;font-size:.75rem;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:.5rem" placeholder='[{"collection":"users","data":[{"email":"admin@amia.fr","password":"admin123","firstName":"Admin","lastName":"System","status":"active"}]}]'></textarea>
+    <textarea id="seedJson" rows="6" style="width:100%;font-family:monospace;font-size:.75rem;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:.5rem" placeholder='{"rbac":{...},"seeds":[{"key":"...","collection":"...","data":[...]}]}'></textarea>
     <button class="btn" style="background:#6366f1;margin-top:.3rem;font-size:.8rem" onclick="doSeedCustom()">Executer le seed</button>
     <span id="seedCustomStatus" style="font-size:.8rem;color:#64748b;margin-left:.5rem"></span>
   </div>
@@ -514,13 +631,33 @@ async function doSeedCustom(){
   if(!raw){sc.textContent='JSON requis';sc.style.color='#f87171';return;}
   sc.textContent='Seeding...';sc.style.color='#94a3b8';
   try{
-    const seeds=JSON.parse(raw);
-    const res=await fetch(BASE+'/'+PROJECT+'/api/seed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({seeds:Array.isArray(seeds)?seeds:[seeds]})});
+    const parsed=JSON.parse(raw);
+    // Detect full format {rbac:{},seeds:[]} vs simple [{collection,data}]
+    const isFull=parsed.rbac||parsed.seeds;
+    const url=isFull?BASE+'/'+PROJECT+'/api/seed-file':BASE+'/'+PROJECT+'/api/seed';
+    const body=isFull?parsed:{seeds:Array.isArray(parsed)?parsed:[parsed]};
+    const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const data=await res.json();
     if(data.ok){
       sc.textContent='✅ '+data.message;sc.style.color='#6ee7b7';
     }else{sc.textContent='❌ '+(data.error||'Seed failed');sc.style.color='#f87171';}
   }catch(e){sc.textContent='❌ '+e.message;sc.style.color='#f87171';}
+}
+
+async function doUploadSeed(input){
+  const file=input.files[0];if(!file)return;
+  const s4=document.getElementById('step4Status');
+  s4.textContent='Upload seed...';s4.style.color='#94a3b8';
+  try{
+    const text=await file.text();
+    const parsed=JSON.parse(text);
+    const res=await fetch(BASE+'/'+PROJECT+'/api/seed-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(parsed)});
+    const data=await res.json();
+    if(data.ok){
+      s4.textContent='✅ '+data.message;s4.style.color='#6ee7b7';
+    }else{s4.textContent='❌ '+(data.error||'Seed failed');s4.style.color='#f87171';}
+  }catch(e){s4.textContent='❌ '+e.message;s4.style.color='#f87171';}
+  input.value='';
 }
 </script>
 </body></html>`;
