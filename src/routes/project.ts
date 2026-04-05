@@ -322,7 +322,15 @@ export function registerProjectRoutes(
 // ── Project dashboard HTML ──
 function getProjectDashboardHtml(project: string, projectInfo: any, req: any): string {
   const schemas = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
-  const schemasCount = schemas.length;
+  let schemasCount = schemas.length;
+  // Also check if schema file exists (uploaded but not yet loaded in memory)
+  try {
+    const fs = require('fs');
+    if (schemasCount === 0 && fs.existsSync('schemas/' + project + '.json')) {
+      const fileSchemas = JSON.parse(fs.readFileSync('schemas/' + project + '.json', 'utf-8'));
+      schemasCount = Array.isArray(fileSchemas) ? fileSchemas.length : 0;
+    }
+  } catch {}
   const protocol = req.protocol || 'https';
   const host = req.hostname || 'localhost';
 
