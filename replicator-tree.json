@@ -12,6 +12,19 @@
       }
     }
   },
-  "rules": {},
-  "routing": {}
+  "rules": {
+    "r1": {
+      "source": "default",
+      "target": "default",
+      "mode": "snapshot",
+      "collections": [
+        "users"
+      ],
+      "conflictResolution": "source-wins",
+      "enabled": true
+    }
+  },
+  "routing": {
+    "default": "round-robin"
+  }
 }
