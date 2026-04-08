@@ -54,10 +54,12 @@ export function registerProjectRoutes(
 
     const method = req.method.toUpperCase();
     const url = req.url as string;
-    const parts = url.split('/').filter(Boolean);
+    // Strip query string before splitting path segments
+    const pathOnly = url.split('?')[0];
+    const parts = pathOnly.split('/').filter(Boolean);
     const collIdx = parts.indexOf(collection);
     const rawId = parts[collIdx + 1] || null;
-    const id = rawId ? rawId.split('?')[0] : null;
+    const id = rawId || null;
     const body = req.body as Record<string, unknown> | undefined;
 
     // Parse query params
@@ -68,14 +70,22 @@ export function registerProjectRoutes(
     const limit = query.limit ? parseInt(query.limit) : undefined;
     const skip = query.skip ? parseInt(query.skip) : undefined;
     const sort = query.sort ? JSON.parse(query.sort) : undefined;
+    const relations = query.relations?.split(',').filter(Boolean);
+    const select = query.select?.split(',').filter(Boolean);
 
     const ormReq: OrmRequest = { entity: schema.name, op: 'findAll' };
-    if (method === 'GET' && !id) { ormReq.op = 'findAll'; if (filter) ormReq.filter = filter; if (limit || skip || sort) ormReq.options = { limit, skip, sort }; }
+    // Build options without undefined values
+    const opts: Record<string, unknown> = {};
+    if (limit !== undefined) opts.limit = limit;
+    if (skip !== undefined) opts.skip = skip;
+    if (sort) opts.sort = sort;
+    if (select?.length) opts.select = select;
+    if (method === 'GET' && !id) { ormReq.op = 'findAll'; if (filter) ormReq.filter = filter; if (Object.keys(opts).length) ormReq.options = opts as any; if (relations?.length) ormReq.relations = relations; }
     else if (method === 'GET' && id === 'count') { ormReq.op = 'count'; if (filter) ormReq.filter = filter; }
-    else if (method === 'GET' && id === 'one') { ormReq.op = 'findOne'; if (filter) ormReq.filter = filter; }
+    else if (method === 'GET' && id === 'one') { ormReq.op = 'findOne'; if (filter) ormReq.filter = filter; if (relations?.length) ormReq.relations = relations; }
     else if (method === 'GET' && id === 'search') { ormReq.op = 'search'; ormReq.query = query.q || query.query || ''; if (limit) ormReq.options = { limit }; }
-    else if (method === 'GET' && id) { ormReq.op = 'findById'; ormReq.id = id; }
-    else if (method === 'POST') { ormReq.op = 'create'; ormReq.data = body; }
+    else if (method === 'GET' && id) { ormReq.op = 'findById'; ormReq.id = id; if (relations?.length) ormReq.relations = relations; if (select) ormReq.options = { select }; }
+    else if (method === 'POST') { ormReq.op = 'create'; ormReq.data = body; if (relations?.length) ormReq.relations = relations; }
     else if (method === 'PUT' && id) { ormReq.op = 'update'; ormReq.id = id; ormReq.data = body; }
     else if (method === 'DELETE' && id) { ormReq.op = 'delete'; ormReq.id = id; }
 

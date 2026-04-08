@@ -4,3 +4,5 @@ dist/
 .env
 .env.local
 .mosta/
+package-lock.json
+src/server.ts.backup
