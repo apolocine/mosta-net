@@ -1,0 +1,12 @@
+{
+  "name": "octonet-transports-test",
+  "version": "1.0.0",
+  "description": "Serveur de test pour valider les 9-11 transports OctoNet",
+  "author": "Dr Hamid MADANI <drmdh@msn.com>",
+  "private": true,
+  "dependencies": {
+    "@mostajs/mproject": "^1.0.5",
+    "@mostajs/net": "^2.0.38",
+    "@mostajs/orm": "^1.7.8"
+  }
+}

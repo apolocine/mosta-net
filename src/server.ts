@@ -22,6 +22,7 @@ import { McpTransport } from './transports/mcp.transport.js';
 import { TrpcTransport } from './transports/trpc.transport.js';
 import { ODataTransport } from './transports/odata.transport.js';
 import { getHelpTabHtml, getHelpTabScript } from './views/help.js';
+import { getReplicatorTabHtml, getReplicatorTabScript } from './views/replicator.js';
 import { registerProjectRoutes } from './routes/project.js';
 import { GrpcTransport } from './transports/grpc.transport.js';
 import { NatsTransport } from './transports/nats.transport.js';
@@ -31,6 +32,7 @@ export interface NetServer {
   app: FastifyInstance;
   entityService: EntityService;
   pm: ProjectManager;
+  rm: any;
   stop: () => Promise<void>;
 }
 
@@ -128,6 +130,28 @@ export async function startServer(): Promise<NetServer> {
     }
   } catch (e) {
     console.warn(`  ⚠ Failed to load projects from ${projectsFile}:`, e instanceof Error ? e.message : e);
+  }
+
+  // 4e. Initialize ReplicationManager (optional — @mostajs/replicator)
+  let rm: any = null;
+  try {
+    const { ReplicationManager } = await import('@mostajs/replicator');
+    rm = new ReplicationManager(pm as any);
+    const replicaFile = process.env.MOSTA_REPLICAS || 'replicator-tree.json';
+    rm.enableAutoPersist(replicaFile);
+    try {
+      const { existsSync } = await import('fs');
+      if (existsSync(replicaFile)) {
+        await rm.loadFromFile(replicaFile);
+        console.log(`  Replicas loaded from ${replicaFile} (${rm.size} replica(s), ${rm.listRules().length} rule(s))`);
+      }
+    } catch (e: any) {
+      console.warn(`  ⚠ Replicas config:`, e.message);
+    }
+    console.log(`  Replicator: ready`);
+  } catch {
+    // @mostajs/replicator not installed — optional feature
+    console.log(`  Replicator: not installed (optional)`);
   }
 
   // 5. Display startup banner
@@ -253,10 +277,18 @@ ${C.cyan}└──────────────────────�
     done();
   });
 
-  // 6. ORM handler — context-aware via ProjectManager
+  // 6. ORM handler — context-aware via ProjectManager + CQRS read routing
+  const readOps = new Set(['findAll', 'findOne', 'findById', 'findByIdWithRelations', 'findWithRelations', 'count', 'search', 'aggregate', 'distinct']);
   const ormHandler = async (req: OrmRequest, ctx: TransportContext): Promise<OrmResponse> => {
     // Resolve the right EntityService for this project
-    const es = pm.resolveEntityService(ctx.projectName);
+    let es = pm.resolveEntityService(ctx.projectName);
+
+    // CQRS read routing: redirect reads to slaves if replicas configured
+    if (rm && ctx.projectName && rm.hasReplicas(ctx.projectName) && readOps.has(req.op)) {
+      const readEs = rm.resolveReadService(ctx.projectName);
+      if (readEs) es = readEs;
+    }
+
     if (!es) {
       const projectMsg = ctx.projectName ? `Projet "${ctx.projectName}" non trouvé` : 'Base de donnees non connectee';
       return { status: 'error', data: null, error: { code: 'DB_NOT_CONNECTED', message: projectMsg + ': ' + (dbError || 'configurez DB_DIALECT + SGBD_URI') } };
@@ -1305,6 +1337,12 @@ ${C.cyan}└──────────────────────�
   // 8g. Project namespace routing — /:project/* (externalized in src/routes/project.ts)
   registerProjectRoutes(app, pm, ormHandler);
 
+  // 8h. Replicator routes (optional — only if @mostajs/replicator installed)
+  if (rm) {
+    const { registerReplicatorRoutes } = await import('./routes/replicator.js');
+    registerReplicatorRoutes(app, rm);
+  }
+
   // 8h. Home page — net dashboard
   app.get('/', async (req, reply) => {
     reply.type('text/html');
@@ -1353,7 +1391,9 @@ ${C.cyan}└──────────────────────�
     app,
     entityService: entityService!,
     pm,
+    rm,
     stop: async () => {
+      if (rm) await rm.disconnectAll();
       await pm.disconnectAll();
       await stopAllTransports();
       await app.close();
@@ -1813,6 +1853,7 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
   <div class="nav-tabs">
     <button class="nav-tab active" onclick="showTab('dashboard')">Dashboard</button>
     <button class="nav-tab" onclick="showTab('projects')">Projects</button>
+    <button class="nav-tab" onclick="showTab('replicas')">Replicas</button>
     <button class="nav-tab" onclick="showTab('mcp')">MCP Agent</button>
     <button class="nav-tab" onclick="showTab('admin')">Admin</button>
     <button class="nav-tab" onclick="showTab('help')" style="margin-left:auto">Help</button>
@@ -2016,6 +2057,8 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
   </div>
 
   </div><!-- /tab-projects -->
+
+  ${getReplicatorTabHtml()}
 
   <!-- TAB: MCP Agent -->
   <div id="tab-mcp" class="tab-content">
@@ -2267,6 +2310,7 @@ function refreshActiveTab(){
   if(name==='dashboard')refreshDashboard();
   if(name==='projects'){loadProjects();loadConfigTree();loadSchemaElectro();loadPerf();}
   if(name==='mcp'){updateMcpProjectLabel();mcpLoadTools();}
+  if(name==='replicas'){loadReplicaProjects();loadRules();}
   if(name==='admin')refreshAdminEntities();
 }
 
@@ -2285,6 +2329,8 @@ function showTab(name){
   refreshActiveTab();
 }
 const SCHEMAS=${JSON.stringify(schemas.map(s => ({ name: s.name, collection: s.collection })))};
+
+${getReplicatorTabScript()}
 
 // ── Dashboard: refresh config for selected project ──
 async function refreshDashboard(){

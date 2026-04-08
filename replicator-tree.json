@@ -1,0 +1,17 @@
+{
+  "replicas": {
+    "default": {
+      "slave1": {
+        "role": "master",
+        "dialect": "sqlite",
+        "uri": ":memory:",
+        "pool": {
+          "min": 2,
+          "max": 20
+        }
+      }
+    }
+  },
+  "rules": {},
+  "routing": {}
+}
