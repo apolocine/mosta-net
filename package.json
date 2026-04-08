@@ -1,6 +1,6 @@
 {
   "name": "@mostajs/net",
-  "version": "2.0.74",
+  "version": "2.1.0",
   "description": "Multi-protocol transport layer for @mostajs/orm — expose entities via REST, gRPC, GraphQL, WebSocket, SSE, tRPC, MCP, OData, Arrow Flight, JSON-RPC, NATS",
   "author": "Dr Hamid MADANI <drmdh@msn.com>",
   "license": "AGPL-3.0-or-later",
@@ -21,12 +21,33 @@
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js",
       "default": "./dist/client.js"
+    },
+    "./middleware/cloud-hook": {
+      "types": "./dist/middleware/cloud-hook.d.ts",
+      "import": "./dist/middleware/cloud-hook.js",
+      "default": "./dist/middleware/cloud-hook.js"
+    },
+    "./middleware/transport-filter": {
+      "types": "./dist/middleware/transport-filter.d.ts",
+      "import": "./dist/middleware/transport-filter.js",
+      "default": "./dist/middleware/transport-filter.js"
+    },
+    "./middleware/admin-auth": {
+      "types": "./dist/middleware/admin-auth.d.ts",
+      "import": "./dist/middleware/admin-auth.js",
+      "default": "./dist/middleware/admin-auth.js"
+    },
+    "./middleware/project-metrics": {
+      "types": "./dist/middleware/project-metrics.d.ts",
+      "import": "./dist/middleware/project-metrics.js",
+      "default": "./dist/middleware/project-metrics.js"
     }
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/cli.js serve"
+    "start": "node dist/cli.js serve",
+    "test:cloud": "tsx test-scripts/test-cloud-extensions.ts"
   },
   "peerDependencies": {
     "@mostajs/mproject": "^1.0.7",
