@@ -154,6 +154,10 @@ export async function startServer(): Promise<NetServer> {
     console.log(`  Replicator: not installed (optional)`);
   }
 
+  // 4f. Cloud Middleware (API key validation, quota, project routing)
+  const { initCloudMiddleware } = await import('./middleware/cloud-init.js');
+  const cloudProcessRequest = await initCloudMiddleware(pm);
+
   // 5. Display startup banner
   const C = { reset: '\x1b[0m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m', yellow: '\x1b[33m', magenta: '\x1b[35m', gray: '\x1b[90m', blue: '\x1b[34m' };
   const maskedUri = (process.env.SGBD_URI || '').replace(/:([^@]+)@/, ':***@');
@@ -280,6 +284,22 @@ ${C.cyan}└──────────────────────�
   // 6. ORM handler — context-aware via ProjectManager + CQRS read routing
   const readOps = new Set(['findAll', 'findOne', 'findById', 'findByIdWithRelations', 'findWithRelations', 'count', 'search', 'aggregate', 'distinct']);
   const ormHandler = async (req: OrmRequest, ctx: TransportContext): Promise<OrmResponse> => {
+    // Cloud middleware: validate API key, quota, permissions
+    if (cloudProcessRequest && ctx.projectName && ctx.projectName !== 'default') {
+      const opType = readOps.has(req.op) ? 'GET' : 'POST';
+      const result = await cloudProcessRequest(
+        ctx.apiKey, ctx.projectName, ctx.transport, opType, undefined, ctx.meta?.ip as string
+      );
+      if (!result.passed) {
+        const r = result.response ?? { status: 401, body: { error: 'Unauthorized' } };
+        return { status: 'error', data: null, error: { code: 'CLOUD_REJECTED', message: r.body?.error ?? r.body?.message ?? 'Access denied' } };
+      }
+      // Use mprojectName from cloud context for project routing
+      if (result.context?.mprojectName) {
+        ctx.projectName = result.context.mprojectName;
+      }
+    }
+
     // Resolve the right EntityService for this project
     let es = pm.resolveEntityService(ctx.projectName);
 
