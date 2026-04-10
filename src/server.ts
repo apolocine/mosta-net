@@ -294,10 +294,8 @@ ${C.cyan}└──────────────────────�
         const r = result.response ?? { status: 401, body: { error: 'Unauthorized' } };
         return { status: 'error', data: null, error: { code: 'CLOUD_REJECTED', message: r.body?.error ?? r.body?.message ?? 'Access denied' } };
       }
-      // Use mprojectName from cloud context for project routing
-      if (result.context?.mprojectName) {
-        ctx.projectName = result.context.mprojectName;
-      }
+      // Cloud validated — keep ctx.projectName as slug (NET knows projects by slug)
+      // The mprojectName (accountId_slug) is for internal portal tracking only
     }
 
     // Resolve the right EntityService for this project
