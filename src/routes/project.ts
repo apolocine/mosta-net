@@ -89,7 +89,9 @@ export function registerProjectRoutes(
     else if (method === 'PUT' && id) { ormReq.op = 'update'; ormReq.id = id; ormReq.data = body; }
     else if (method === 'DELETE' && id) { ormReq.op = 'delete'; ormReq.id = id; }
 
-    const ctx: TransportContext = { transport: 'rest', projectName };
+    // Extract API key from header or query param (?apikey=)
+    const rawApiKey = req.headers['x-api-key'] as string ?? urlObj.searchParams.get('apikey') ?? undefined;
+    const ctx: TransportContext = { transport: 'rest', projectName, apiKey: rawApiKey, meta: { ip: req.ip } };
     try {
       return await ormHandler(ormReq, ctx);
     } catch (e: unknown) {
