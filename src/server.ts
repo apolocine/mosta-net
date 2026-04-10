@@ -992,8 +992,36 @@ ${C.cyan}└──────────────────────�
 
   // ── Multi-project API (/api/projects) ──
 
-  app.get('/api/projects', async () => {
-    const list = pm.listProjects();
+  app.get('/api/projects', async (req) => {
+    let list = pm.listProjects();
+
+    // Cloud mode: filter projects by API key
+    if (cloudProcessRequest) {
+      const rawKey = (req.headers['x-api-key'] as string) ?? (req.query as any)?.apikey ?? undefined;
+      if (!rawKey) {
+        // No API key → default project only
+        list = list.filter((p: any) => p.name === 'default');
+      } else {
+        try {
+          const { getNamedConnection } = await import('@mostajs/orm');
+          const portalDb = getNamedConnection('cloud-portal');
+          if (portalDb) {
+            const { resolveApiKey } = await import('@mostajs/api-keys/server');
+            const apiKey = await resolveApiKey(portalDb, rawKey);
+            if (apiKey) {
+              const { getProjectRepo } = await import('@mostajs/project-life/server');
+              const userProjects = await getProjectRepo(portalDb).findAll({ account: (apiKey as any).account });
+              const userSlugs = new Set(userProjects.map((p: any) => p.slug));
+              list = list.filter((p: any) => userSlugs.has(p.name) || p.name === 'default');
+            } else {
+              list = list.filter((p: any) => p.name === 'default');
+            }
+          }
+        } catch {
+          list = list.filter((p: any) => p.name === 'default');
+        }
+      }
+    }
     const { readFileSync, existsSync } = await import('fs');
     const { resolve: resolvePath } = await import('path');
     // Read projects-tree.json for persisted config (uri, strategy, description)
@@ -1880,6 +1908,16 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
   <!-- TAB: Dashboard -->
   <div id="tab-dashboard" class="tab-content active">
 
+  ${process.env.PORTAL_DB_URI ? `
+  <div id="cloud-banner" style="padding:1rem;margin-bottom:1rem;border-radius:8px;background:linear-gradient(90deg,#605DFF22,#5DA8FF22);border:1px solid #605DFF44">
+    <div style="font-weight:700;margin-bottom:.25rem">OctoNet Cloud</div>
+    <div style="font-size:.85rem;color:#94a3b8">
+      Ce serveur est protege par API key. Pour gerer vos projets, cles API et abonnements :
+      <a href="https://octonet.amia.fr" target="_blank" style="color:#818cf8;font-weight:600">octonet.amia.fr →</a>
+    </div>
+  </div>
+  ` : ''}
+
   <h2>Configuration</h2>
   <div class="card">
     <table style="width:100%;font-size:.9rem">
@@ -2284,6 +2322,24 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
 const BASE=window.location.origin;
 
 // ── Global project context ──
+// Read API key from URL ?apikey= and inject in all fetch calls
+const _urlParams = new URLSearchParams(window.location.search);
+const _apiKey = _urlParams.get('apikey') || '';
+if (_apiKey) {
+  const _origFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    if (typeof opts.headers === 'object' && !Array.isArray(opts.headers)) {
+      opts.headers['x-api-key'] = _apiKey;
+    }
+    // Also append apikey to URL for browser navigation
+    if (typeof url === 'string' && !url.includes('apikey=')) {
+      url += (url.includes('?') ? '&' : '?') + 'apikey=' + encodeURIComponent(_apiKey);
+    }
+    return _origFetch.call(this, url, opts);
+  };
+}
 let _selectedProject='default';
 let _projectsCache=[];
 
