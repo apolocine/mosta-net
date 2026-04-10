@@ -1012,7 +1012,7 @@ ${C.cyan}└──────────────────────�
               const { getProjectRepo } = await import('@mostajs/project-life/server');
               const userProjects = await getProjectRepo(portalDb).findAll({ account: (apiKey as any).account });
               const userSlugs = new Set(userProjects.map((p: any) => p.slug));
-              list = list.filter((p: any) => userSlugs.has(p.name) || p.name === 'default');
+              list = list.filter((p: any) => userSlugs.has(p.name));
             } else {
               list = list.filter((p: any) => p.name === 'default');
             }
