@@ -21,6 +21,9 @@ import { JsonRpcTransport } from './transports/jsonrpc.transport.js';
 import { McpTransport } from './transports/mcp.transport.js';
 import { TrpcTransport } from './transports/trpc.transport.js';
 import { ODataTransport } from './transports/odata.transport.js';
+import { getHelpTabHtml, getHelpTabScript } from './views/help.js';
+import { getReplicatorTabHtml, getReplicatorTabScript } from './views/replicator.js';
+import { registerProjectRoutes } from './routes/project.js';
 import { GrpcTransport } from './transports/grpc.transport.js';
 import { NatsTransport } from './transports/nats.transport.js';
 import { ArrowFlightTransport } from './transports/arrow.transport.js';
@@ -29,6 +32,7 @@ export interface NetServer {
   app: FastifyInstance;
   entityService: EntityService;
   pm: ProjectManager;
+  rm: any;
   stop: () => Promise<void>;
 }
 
@@ -128,6 +132,32 @@ export async function startServer(): Promise<NetServer> {
     console.warn(`  ⚠ Failed to load projects from ${projectsFile}:`, e instanceof Error ? e.message : e);
   }
 
+  // 4e. Initialize ReplicationManager (optional — @mostajs/replicator)
+  let rm: any = null;
+  try {
+    const { ReplicationManager } = await import('@mostajs/replicator');
+    rm = new ReplicationManager(pm as any);
+    const replicaFile = process.env.MOSTA_REPLICAS || 'replicator-tree.json';
+    rm.enableAutoPersist(replicaFile);
+    try {
+      const { existsSync } = await import('fs');
+      if (existsSync(replicaFile)) {
+        await rm.loadFromFile(replicaFile);
+        console.log(`  Replicas loaded from ${replicaFile} (${rm.size} replica(s), ${rm.listRules().length} rule(s))`);
+      }
+    } catch (e: any) {
+      console.warn(`  ⚠ Replicas config:`, e.message);
+    }
+    console.log(`  Replicator: ready`);
+  } catch {
+    // @mostajs/replicator not installed — optional feature
+    console.log(`  Replicator: not installed (optional)`);
+  }
+
+  // 4f. Cloud Middleware (API key validation, quota, project routing)
+  const { initCloudMiddleware } = await import('./middleware/cloud-init.js');
+  const cloudProcessRequest = await initCloudMiddleware(pm);
+
   // 5. Display startup banner
   const C = { reset: '\x1b[0m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m', yellow: '\x1b[33m', magenta: '\x1b[35m', gray: '\x1b[90m', blue: '\x1b[34m' };
   const maskedUri = (process.env.SGBD_URI || '').replace(/:([^@]+)@/, ':***@');
@@ -144,11 +174,16 @@ ${C.cyan}└──────────────────────�
 `);
 
   // 5b. Create shared Fastify instance
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, bodyLimit: 10 * 1024 * 1024 }); // 10 MB
 
   // CORS — allow cross-origin requests (ornetadmin API Explorer, Studio, etc.)
   const cors = (await import('@fastify/cors')).default;
-  await app.register(cors, { origin: true });
+  await app.register(cors, {
+    origin: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-project', 'mcp-session-id', 'Accept'],
+    credentials: true,
+  });
 
   // 5c. Performance tracker + Rate limiter
   const perfStats = {
@@ -246,12 +281,34 @@ ${C.cyan}└──────────────────────�
     done();
   });
 
-  // 6. ORM handler — context-aware via ProjectManager
+  // 6. ORM handler — context-aware via ProjectManager + CQRS read routing
+  const readOps = new Set(['findAll', 'findOne', 'findById', 'findByIdWithRelations', 'findWithRelations', 'count', 'search', 'aggregate', 'distinct']);
   const ormHandler = async (req: OrmRequest, ctx: TransportContext): Promise<OrmResponse> => {
+    // Cloud middleware: validate API key, quota, permissions
+    if (cloudProcessRequest && ctx.projectName && ctx.projectName !== 'default') {
+      const opType = readOps.has(req.op) ? 'GET' : 'POST';
+      const result = await cloudProcessRequest(
+        ctx.apiKey, ctx.projectName, ctx.transport, opType, undefined, ctx.meta?.ip as string
+      );
+      if (!result.passed) {
+        const r = result.response ?? { status: 401, body: { error: 'Unauthorized' } };
+        return { status: 'error', data: null, error: { code: 'CLOUD_REJECTED', message: r.body?.error ?? r.body?.message ?? 'Access denied' } };
+      }
+      // Cloud validated — keep ctx.projectName as slug (NET knows projects by slug)
+      // The mprojectName (accountId_slug) is for internal portal tracking only
+    }
+
     // Resolve the right EntityService for this project
-    const es = pm.resolveEntityService(ctx.projectId);
+    let es = pm.resolveEntityService(ctx.projectName);
+
+    // CQRS read routing: redirect reads to slaves if replicas configured
+    if (rm && ctx.projectName && rm.hasReplicas(ctx.projectName) && readOps.has(req.op)) {
+      const readEs = rm.resolveReadService(ctx.projectName);
+      if (readEs) es = readEs;
+    }
+
     if (!es) {
-      const projectMsg = ctx.projectId ? `Projet "${ctx.projectId}" non trouvé` : 'Base de donnees non connectee';
+      const projectMsg = ctx.projectName ? `Projet "${ctx.projectName}" non trouvé` : 'Base de donnees non connectee';
       return { status: 'error', data: null, error: { code: 'DB_NOT_CONNECTED', message: projectMsg + ': ' + (dbError || 'configurez DB_DIALECT + SGBD_URI') } };
     }
     return es.execute(req);
@@ -589,8 +646,10 @@ ${C.cyan}└──────────────────────�
       if (dialect) {
         await dialect.initSchema(getAllSchemas());
       }
-      // Save schemas.json for next startup
+      // Save schemas/default.json + schemas.json (backward compat)
       const fs = await import('fs');
+      if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
+      fs.writeFileSync('schemas/default.json', JSON.stringify(body.schemas, null, 2));
       fs.writeFileSync('schemas.json', JSON.stringify(body.schemas, null, 2));
       // Schemas sauvés + tables créées — redémarrage pour enregistrer les routes
       // Délai 2s pour laisser la réponse HTTP arriver au client avant exit
@@ -933,7 +992,58 @@ ${C.cyan}└──────────────────────�
 
   // ── Multi-project API (/api/projects) ──
 
-  app.get('/api/projects', async () => pm.listProjects());
+  app.get('/api/projects', async (req) => {
+    let list = pm.listProjects();
+
+    // Cloud mode: filter projects by API key
+    if (cloudProcessRequest) {
+      const rawKey = (req.headers['x-api-key'] as string) ?? (req.query as any)?.apikey ?? undefined;
+      if (!rawKey) {
+        // No API key → default project only
+        list = list.filter((p: any) => p.name === 'default');
+      } else {
+        try {
+          const { getNamedConnection } = await import('@mostajs/orm');
+          const portalDb = getNamedConnection('cloud-portal');
+          if (portalDb) {
+            const { resolveApiKey } = await import('@mostajs/api-keys/server');
+            const apiKey = await resolveApiKey(portalDb, rawKey);
+            if (apiKey) {
+              const { getProjectRepo } = await import('@mostajs/project-life/server');
+              const userProjects = await getProjectRepo(portalDb).findAll({ account: (apiKey as any).account });
+              const userSlugs = new Set(userProjects.map((p: any) => p.slug));
+              list = list.filter((p: any) => userSlugs.has(p.name));
+            } else {
+              list = list.filter((p: any) => p.name === 'default');
+            }
+          }
+        } catch {
+          list = list.filter((p: any) => p.name === 'default');
+        }
+      }
+    }
+    const { readFileSync, existsSync } = await import('fs');
+    const { resolve: resolvePath } = await import('path');
+    // Read projects-tree.json for persisted config (uri, strategy, description)
+    const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+    let tree: Record<string, any> = {};
+    try { tree = JSON.parse(readFileSync(treePath, 'utf-8')); } catch {}
+    // Enrich with ProjectContext + persisted config
+    return list.map((p: any) => {
+      const ctx = pm.getProject(p.name);
+      const conf = tree[p.name] || {};
+      return {
+        ...p,
+        uriMasked: ctx?.uriMasked || '',
+        dialectType: ctx?.dialectType || p.dialect,
+        poolMin: ctx?.pool?.min ?? conf.pool?.min ?? 0,
+        schemaStrategy: conf.schemaStrategy || 'update',
+        description: conf.description || '',
+        showSql: conf.showSql ?? false,
+        formatSql: conf.formatSql ?? false,
+      };
+    });
+  });
 
   app.post('/api/projects', async (req, reply) => {
     const body = req.body as ProjectConfig;
@@ -943,6 +1053,23 @@ ${C.cyan}└──────────────────────�
     }
     try {
       await pm.addProject(body);
+      // Persist to projects-tree.json
+      const { readFileSync, writeFileSync, existsSync } = await import('fs');
+      const { resolve: resolvePath } = await import('path');
+      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      const tree = existsSync(treePath) ? JSON.parse(readFileSync(treePath, 'utf-8')) : {};
+      const { name, ...config } = body;
+      // Save schemas as file path reference if schemas are an array
+      if (Array.isArray(config.schemas) && config.schemas.length > 0) {
+        const fs = await import('fs');
+        if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
+        const schemaFile = 'schemas/' + name + '.json';
+        fs.writeFileSync(schemaFile, JSON.stringify(config.schemas, null, 2));
+        tree[name] = { ...config, schemas: schemaFile };
+      } else {
+        tree[name] = config;
+      }
+      writeFileSync(treePath, JSON.stringify(tree, null, 2));
       return { ok: true, projects: pm.listProjects() };
     } catch (e: unknown) {
       reply.status(400);
@@ -952,9 +1079,38 @@ ${C.cyan}└──────────────────────�
 
   app.put('/api/projects/:name', async (req, reply) => {
     const { name } = req.params as { name: string };
-    const body = req.body as Partial<ProjectConfig>;
+    const body = req.body as Record<string, unknown>;
     try {
-      await pm.updateProject(name, body);
+      // Update in-memory (only ProjectConfig fields)
+      const pmUpdate: any = {};
+      if (body.dialect) pmUpdate.dialect = body.dialect;
+      if (body.uri) pmUpdate.uri = body.uri;
+      if (body.schemas) pmUpdate.schemas = body.schemas;
+      if (body.pool) pmUpdate.pool = body.pool;
+      if (body.schemaStrategy) pmUpdate.schemaStrategy = body.schemaStrategy;
+      if (Object.keys(pmUpdate).length > 0) {
+        await pm.updateProject(name, pmUpdate);
+      }
+      // Persist ALL fields to projects-tree.json (including description, showSql, etc.)
+      const { readFileSync, writeFileSync, existsSync } = await import('fs');
+      const { resolve: resolvePath } = await import('path');
+      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      const tree = existsSync(treePath) ? JSON.parse(readFileSync(treePath, 'utf-8')) : {};
+      if (!tree[name]) tree[name] = {};
+      // Merge all fields except 'name'
+      for (const [k, v] of Object.entries(body)) {
+        if (k === 'name') continue;
+        if (v !== undefined && v !== null && v !== '') tree[name][k] = v;
+      }
+      // Save schemas as file if array
+      if (Array.isArray(body.schemas) && (body.schemas as any[]).length > 0) {
+        const fs = await import('fs');
+        if (!fs.existsSync('schemas')) fs.mkdirSync('schemas', { recursive: true });
+        const schemaFile = 'schemas/' + name + '.json';
+        fs.writeFileSync(schemaFile, JSON.stringify(body.schemas, null, 2));
+        tree[name].schemas = schemaFile;
+      }
+      writeFileSync(treePath, JSON.stringify(tree, null, 2));
       return { ok: true, projects: pm.listProjects() };
     } catch (e: unknown) {
       reply.status(400);
@@ -964,9 +1120,54 @@ ${C.cyan}└──────────────────────�
 
   app.delete('/api/projects/:name', async (req, reply) => {
     const { name } = req.params as { name: string };
+    const query = req.query as Record<string, string>;
+    const deleteSchema = query.deleteSchema === 'true';
+    const deleteDb = query.deleteDb === 'true';
     try {
+      // Read config before removing (need URI for drop DB)
+      const { readFileSync, writeFileSync, existsSync, unlinkSync } = await import('fs');
+      const { resolve: resolvePath } = await import('path');
+      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      let projConf: any = null;
+      if (existsSync(treePath)) {
+        try { projConf = JSON.parse(readFileSync(treePath, 'utf-8'))[name]; } catch {}
+      }
+
       await pm.removeProject(name);
-      return { ok: true, projects: pm.listProjects() };
+
+      // Remove from projects-tree.json
+      let schemaDeleted = false;
+      let dbDropped = false;
+      if (existsSync(treePath)) {
+        try {
+          const tree = JSON.parse(readFileSync(treePath, 'utf-8'));
+          if (tree[name]) {
+            delete tree[name];
+            writeFileSync(treePath, JSON.stringify(tree, null, 2));
+          }
+        } catch {}
+      }
+
+      // Delete schema file
+      if (deleteSchema) {
+        const schemaFile = resolvePath(process.cwd(), 'schemas/' + name + '.json');
+        if (existsSync(schemaFile)) {
+          unlinkSync(schemaFile);
+          schemaDeleted = true;
+        }
+      }
+
+      // Drop database (uses @mostajs/orm dropDatabase)
+      if (deleteDb && projConf?.dialect && projConf?.uri) {
+        try {
+          const { dropDatabase } = await import('@mostajs/orm');
+          const dbName = projConf.uri.split('/').pop()?.split('?')[0] || name;
+          const result = await dropDatabase(projConf.dialect, projConf.uri, dbName);
+          dbDropped = result.ok;
+        } catch {}
+      }
+
+      return { ok: true, schemaDeleted, dbDropped, projects: pm.listProjects() };
     } catch (e: unknown) {
       reply.status(404);
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -1118,7 +1319,33 @@ ${C.cyan}└──────────────────────�
       'transports.sse': 'MOSTA_NET_SSE_ENABLED',
       'transports.jsonrpc': 'MOSTA_NET_JSONRPC_ENABLED',
       'transports.mcp': 'MOSTA_NET_MCP_ENABLED',
+      'transports.grpc': 'MOSTA_NET_GRPC_ENABLED',
+      'transports.trpc': 'MOSTA_NET_TRPC_ENABLED',
+      'transports.odata': 'MOSTA_NET_ODATA_ENABLED',
+      'transports.nats': 'MOSTA_NET_NATS_ENABLED',
+      'transports.arrow': 'MOSTA_NET_ARROW_ENABLED',
     };
+
+    // Check if key is a project property (e.g. "projects.analytics.dialect")
+    if (body.key.startsWith('projects.')) {
+      const parts = body.key.replace('projects.', '').split('.');
+      // parts[0] = project name, parts[1..] = property path
+      if (parts.length >= 2) {
+        const projectsPath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+        let tree: Record<string, any> = {};
+        try { tree = JSON.parse(readFileSync(projectsPath, 'utf-8')); } catch {}
+        const projName = parts[0];
+        if (!tree[projName]) tree[projName] = {};
+        let obj = tree[projName];
+        for (let i = 1; i < parts.length - 1; i++) {
+          if (!obj[parts[i]]) obj[parts[i]] = {};
+          obj = obj[parts[i]];
+        }
+        obj[parts[parts.length - 1]] = body.value;
+        writeFileSync(projectsPath, JSON.stringify(tree, null, 2), 'utf-8');
+        return { ok: true, key: body.key, file: 'projects-tree.json', value: body.value };
+      }
+    }
 
     const envVar = keyMap[body.key];
     if (!envVar) return { ok: false, error: `Cle inconnue: ${body.key}` };
@@ -1137,7 +1364,7 @@ ${C.cyan}└──────────────────────�
     }
     writeFileSync(envPath, content, 'utf-8');
 
-    return { ok: true, key: body.key, envVar, value: body.value };
+    return { ok: true, key: body.key, envVar, file: '.env', value: body.value };
   });
 
   // 8f. Serve logo
@@ -1153,7 +1380,16 @@ ${C.cyan}└──────────────────────�
     } catch { reply.status(404); return 'Logo not found'; }
   });
 
-  // 8g. Home page — net dashboard
+  // 8g. Project namespace routing — /:project/* (externalized in src/routes/project.ts)
+  registerProjectRoutes(app, pm, ormHandler);
+
+  // 8h. Replicator routes (optional — only if @mostajs/replicator installed)
+  if (rm) {
+    const { registerReplicatorRoutes } = await import('./routes/replicator.js');
+    registerReplicatorRoutes(app, rm);
+  }
+
+  // 8h. Home page — net dashboard
   app.get('/', async (req, reply) => {
     reply.type('text/html');
     // Lire les valeurs actuelles (pas celles du démarrage)
@@ -1201,7 +1437,9 @@ ${C.cyan}└──────────────────────�
     app,
     entityService: entityService!,
     pm,
+    rm,
     stop: async () => {
+      if (rm) await rm.disconnectAll();
       await pm.disconnectAll();
       await stopAllTransports();
       await app.close();
@@ -1224,27 +1462,27 @@ function registerDynamicRestRoutes(
   const prefix = '/api/v1';
 
   /** Resolve project + collection from params, checking if first param is a project name */
-  const resolveProjectAndCollection = (params: { col: string; sub?: string }, headers: Record<string, string>): { projectId?: string; col: string } => {
+  const resolveProjectAndCollection = (params: { col: string; sub?: string }, headers: Record<string, string>): { projectName?: string; col: string } => {
     // Priority 1: Header X-Project
     const headerProject = headers['x-project'];
     if (headerProject && pm.hasProject(headerProject)) {
-      return { projectId: headerProject, col: params.col };
+      return { projectName: headerProject, col: params.col };
     }
 
     // Priority 2: Path prefix — if params.sub exists, col is the project, sub is the collection
     if (params.sub) {
-      return { projectId: params.col, col: params.sub };
+      return { projectName: params.col, col: params.sub };
     }
 
     // Priority 3: Check if params.col is actually a project name (for /api/v1/:project/:col pattern)
     // Only if it's NOT a known collection
-    return { projectId: undefined, col: params.col };
+    return { projectName: undefined, col: params.col };
   };
 
-  const handle = async (ormReq: OrmRequest, reply: any, projectId?: string, req?: any) => {
-    // Resolve projectId from header if not provided via path
-    const resolvedProjectId = projectId || req?.headers?.['x-project'] || undefined;
-    const ctx: TransportContext = { transport: 'rest', projectId: resolvedProjectId };
+  const handle = async (ormReq: OrmRequest, reply: any, projectName?: string, req?: any) => {
+    // Resolve projectName from header if not provided via path
+    const resolvedProjectId = projectName || req?.headers?.['x-project'] || undefined;
+    const ctx: TransportContext = { transport: 'rest', projectName: resolvedProjectId };
     const res = await ormHandler(ormReq, ctx);
     if (res.status === 'error') {
       reply.status(res.error?.code === 'ENTITY_NOT_FOUND' || res.error?.code === 'EntityNotFoundError' ? 404 :
@@ -1256,10 +1494,10 @@ function registerDynamicRestRoutes(
   };
 
   /** Resolve collection name → entity name. Checks project schemas first, then global registry */
-  const resolveEntity = (collection: string, projectId?: string): string | null => {
-    // If projectId specified, check that project's schemas first
-    if (projectId) {
-      const project = pm.getProject(projectId);
+  const resolveEntity = (collection: string, projectName?: string): string | null => {
+    // If projectName specified, check that project's schemas first
+    if (projectName) {
+      const project = pm.getProject(projectName);
       if (project) {
         const schema = project.schemas.find(s => s.collection === collection || s.name === collection);
         if (schema) return schema.name;
@@ -1276,16 +1514,16 @@ function registerDynamicRestRoutes(
 
   /**
    * If first param is a known project name, shift params:
-   *   /api/v1/project-b/users     → { projectId: 'project-b', col: 'users', id: undefined }
-   *   /api/v1/project-b/users/123 → { projectId: 'project-b', col: 'users', id: '123' }
-   *   /api/v1/users               → { projectId: undefined, col: 'users', id: undefined }
-   *   /api/v1/users/123           → { projectId: undefined, col: 'users', id: '123' }
+   *   /api/v1/project-b/users     → { projectName: 'project-b', col: 'users', id: undefined }
+   *   /api/v1/project-b/users/123 → { projectName: 'project-b', col: 'users', id: '123' }
+   *   /api/v1/users               → { projectName: undefined, col: 'users', id: undefined }
+   *   /api/v1/users/123           → { projectName: undefined, col: 'users', id: '123' }
    * Also supports X-Project header as override.
    */
-  const resolveParams = (col: string, id: string | undefined, headers: Record<string, string>): { projectId?: string; col: string; id?: string } => {
+  const resolveParams = (col: string, id: string | undefined, headers: Record<string, string>): { projectName?: string; col: string; id?: string } => {
     const headerProject = headers['x-project'];
-    if (headerProject) return { projectId: headerProject, col, id };
-    if (pm.hasProject(col)) return { projectId: col, col: id || '', id: undefined };
+    if (headerProject) return { projectName: headerProject, col, id };
+    if (pm.hasProject(col)) return { projectName: col, col: id || '', id: undefined };
     return { col, id };
   };
 
@@ -1313,9 +1551,9 @@ function registerDynamicRestRoutes(
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     // If col was a project → create on that project's collection
-    if (r.projectId && !r.id) {
-      const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
-      const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, r.projectId);
+    if (r.projectName && !r.id) {
+      const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
+      const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, r.projectName);
       if (reply.statusCode < 400) reply.status(201);
       return res;
     }
@@ -1384,54 +1622,54 @@ function registerDynamicRestRoutes(
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     // If col was a project → r.col is the collection, r.id is undefined → findAll on that project
-    if (r.projectId && !r.id) {
-      const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
+    if (r.projectName && !r.id) {
+      const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
       const q = req.query as Record<string, string>;
       const { options, relations } = parseOpts(q);
-      return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, r.projectId);
+      return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, r.projectName);
     }
-    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
+    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
     const q = req.query as Record<string, string>;
     const { options, relations } = parseOpts(q);
-    return handle({ op: 'findById', entity, id: r.id!, options, relations }, reply, r.projectId);
+    return handle({ op: 'findById', entity, id: r.id!, options, relations }, reply, r.projectName);
   });
 
   app.put(`${prefix}/:col/:id`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
-    return handle({ op: 'update', entity, id: r.id!, data: req.body as Record<string, unknown> }, reply, r.projectId);
+    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
+    return handle({ op: 'update', entity, id: r.id!, data: req.body as Record<string, unknown> }, reply, r.projectName);
   });
 
   app.delete(`${prefix}/:col/:id`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
-    return handle({ op: 'delete', entity, id: r.id!, }, reply, r.projectId);
+    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
+    return handle({ op: 'delete', entity, id: r.id!, }, reply, r.projectName);
   });
 
   app.post(`${prefix}/:col/:id/addToSet`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
+    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
     const { field, value } = req.body as { field: string; value: unknown };
-    return handle({ op: 'addToSet', entity, id: r.id!, field, value }, reply, r.projectId);
+    return handle({ op: 'addToSet', entity, id: r.id!, field, value }, reply, r.projectName);
   });
 
   app.post(`${prefix}/:col/:id/pull`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
+    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
     const { field, value } = req.body as { field: string; value: unknown };
-    return handle({ op: 'pull', entity, id: r.id!, field, value }, reply, r.projectId);
+    return handle({ op: 'pull', entity, id: r.id!, field, value }, reply, r.projectName);
   });
 
   app.post(`${prefix}/:col/:id/increment`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
-    const entity = resolveEntity(r.col, r.projectId); if (!entity) return notFound(r.col, reply);
+    const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
     const { field, amount } = req.body as { field: string; amount: number };
-    return handle({ op: 'increment', entity, id: r.id!, field, amount }, reply, r.projectId);
+    return handle({ op: 'increment', entity, id: r.id!, field, amount }, reply, r.projectName);
   });
 
   // ── Collection-level routes (also handles /api/v1/:project/:col via /:col/:id) ──
@@ -1444,18 +1682,18 @@ function registerDynamicRestRoutes(
       const project = pm.getProject(rawCol);
       return { project: rawCol, schemas: project?.schemas.map(s => s.name), status: project?.status };
     }
-    const projectId = h['x-project'] || undefined;
+    const projectName = h['x-project'] || undefined;
     const entity = resolveEntity(rawCol, (req.headers as any)['x-project']); if (!entity) return notFound(rawCol, reply);
     const q = req.query as Record<string, string>;
     const { options, relations } = parseOpts(q);
-    return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, projectId);
+    return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, projectName);
   });
 
   app.post(`${prefix}/:col`, async (req, reply) => {
     const { col: rawCol } = req.params as { col: string };
-    const projectId = (req.headers as Record<string, string>)['x-project'] || undefined;
+    const projectName = (req.headers as Record<string, string>)['x-project'] || undefined;
     const entity = resolveEntity(rawCol, (req.headers as any)['x-project']); if (!entity) return notFound(rawCol, reply);
-    const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, projectId);
+    const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, projectName);
     if (reply.statusCode < 400) reply.status(201);
     return res;
   });
@@ -1648,16 +1886,37 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
     <div class="card stat"><div class="num">${entityList.length * transports.length}</div><div class="label">Endpoints</div></div>
   </div>
 
+  <!-- Global project selector -->
+  <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem;padding:.5rem .75rem;background:#1e293b;border-radius:8px">
+    <label style="font-size:.8rem;color:#94a3b8;white-space:nowrap;font-weight:600">Projet:</label>
+    <select id="globalProject" onchange="onGlobalProjectChange()" style="padding:.35rem .6rem;min-width:220px;border:1px solid #334155;border-radius:4px;background:#0f172a;color:#e2e8f0;font-size:.85rem">
+      <option value="">Tous les projets</option>
+    </select>
+    <span id="globalProjectStatus" style="font-size:.75rem;color:#64748b"></span>
+  </div>
+
   <!-- Navigation tabs -->
   <div class="nav-tabs">
     <button class="nav-tab active" onclick="showTab('dashboard')">Dashboard</button>
     <button class="nav-tab" onclick="showTab('projects')">Projects</button>
+    <button class="nav-tab" onclick="showTab('replicas')">Replicas</button>
     <button class="nav-tab" onclick="showTab('mcp')">MCP Agent</button>
     <button class="nav-tab" onclick="showTab('admin')">Admin</button>
+    <button class="nav-tab" onclick="showTab('help')" style="margin-left:auto">Help</button>
   </div>
 
   <!-- TAB: Dashboard -->
   <div id="tab-dashboard" class="tab-content active">
+
+  ${process.env.PORTAL_DB_URI ? `
+  <div id="cloud-banner" style="padding:1rem;margin-bottom:1rem;border-radius:8px;background:linear-gradient(90deg,#605DFF22,#5DA8FF22);border:1px solid #605DFF44">
+    <div style="font-weight:700;margin-bottom:.25rem">OctoNet Cloud</div>
+    <div style="font-size:.85rem;color:#94a3b8">
+      Ce serveur est protege par API key. Pour gerer vos projets, cles API et abonnements :
+      <a href="https://octonet.amia.fr" target="_blank" style="color:#818cf8;font-weight:600">octonet.amia.fr →</a>
+    </div>
+  </div>
+  ` : ''}
 
   <h2>Configuration</h2>
   <div class="card">
@@ -1855,21 +2114,20 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
 
   </div><!-- /tab-projects -->
 
+  ${getReplicatorTabHtml()}
+
   <!-- TAB: MCP Agent -->
   <div id="tab-mcp" class="tab-content">
 
   <h2>MCP Agent Simulator <span style="font-size:.75rem;color:#64748b;font-weight:normal">— test tools like an AI agent</span></h2>
   <div class="card">
-    <!-- Project selector + buttons -->
+    <!-- MCP buttons (project comes from global selector) -->
     <div style="display:flex;gap:.5rem;margin-bottom:.75rem;align-items:center;flex-wrap:wrap">
-      <label style="font-size:.75rem;color:#94a3b8">Projet:</label>
-      <select id="mcpProject" onchange="mcpLoadTools()" style="padding:.3rem .5rem;min-width:150px">
-        <option value="">Tous les projets</option>
-      </select>
       <button class="btn" style="font-size:.75rem;padding:.3rem .6rem" onclick="mcpLoadTools()">Tools</button>
       <button class="btn" style="font-size:.75rem;padding:.3rem .6rem;background:#6366f1" onclick="mcpLoadPrompts()">Prompts</button>
       <button class="btn" style="font-size:.75rem;padding:.3rem .6rem;background:#334155" onclick="mcpLoadInfo()">Info</button>
       <button class="btn" style="font-size:.75rem;padding:.3rem .6rem;background:#0f766e" onclick="mcpLoadProjectTree()">Arbre projet</button>
+      <span id="mcpProjectLabel" style="font-size:.75rem;color:#64748b"></span>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">
       <!-- Left: Tool selector -->
@@ -2054,10 +2312,86 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
   </div>
 
   </div><!-- /tab-admin -->
+
+  <!-- TAB: Help -->
+  ${getHelpTabHtml(port)}
+
 </div>
 
 <script>
 const BASE=window.location.origin;
+
+// ── Global project context ──
+// Read API key from URL ?apikey= and inject in all fetch calls
+const _urlParams = new URLSearchParams(window.location.search);
+const _apiKey = _urlParams.get('apikey') || '';
+if (_apiKey) {
+  const _origFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    if (typeof opts.headers === 'object' && !Array.isArray(opts.headers)) {
+      opts.headers['x-api-key'] = _apiKey;
+    }
+    // Also append apikey to URL for browser navigation
+    if (typeof url === 'string' && !url.includes('apikey=')) {
+      url += (url.includes('?') ? '&' : '?') + 'apikey=' + encodeURIComponent(_apiKey);
+    }
+    return _origFetch.call(this, url, opts);
+  };
+}
+let _selectedProject='default';
+let _projectsCache=[];
+
+async function loadGlobalProjectDropdown(){
+  try{
+    const res=await fetch(BASE+'/api/projects');
+    _projectsCache=await res.json();
+    const sel=document.getElementById('globalProject');
+    sel.innerHTML='<option value="">Tous les projets</option>';
+    for(const p of _projectsCache){
+      const icon=p.status==='connected'?'🟢':p.status==='error'?'🔴':'⚪';
+      sel.innerHTML+='<option value="'+p.name+'">'+icon+' '+p.name+' ('+p.dialect+', '+p.schemasCount+' schemas)</option>';
+    }
+    sel.value=_selectedProject||'default';
+    updateGlobalProjectStatus();
+  }catch(e){}
+}
+
+function onGlobalProjectChange(){
+  _selectedProject=document.getElementById('globalProject').value;
+  updateGlobalProjectStatus();
+  refreshActiveTab();
+}
+
+function updateGlobalProjectStatus(){
+  const st=document.getElementById('globalProjectStatus');
+  if(!_selectedProject){st.textContent='Contexte: tous les projets';return;}
+  const p=_projectsCache.find(pr=>pr.name===_selectedProject);
+  if(p){
+    const icon=p.status==='connected'?'🟢':p.status==='error'?'🔴':'⚪';
+    st.textContent=icon+' '+p.dialect+' — '+p.schemasCount+' schemas';
+  }else{st.textContent='';}
+}
+
+function getActiveTabName(){
+  const active=document.querySelector('.tab-content.active');
+  return active?active.id.replace('tab-',''):'dashboard';
+}
+
+function refreshActiveTab(){
+  const name=getActiveTabName();
+  if(name==='dashboard')refreshDashboard();
+  if(name==='projects'){loadProjects();loadConfigTree();loadSchemaElectro();loadPerf();}
+  if(name==='mcp'){updateMcpProjectLabel();mcpLoadTools();}
+  if(name==='replicas'){loadReplicaProjects();loadRules();}
+  if(name==='admin')refreshAdminEntities();
+}
+
+function updateMcpProjectLabel(){
+  const el=document.getElementById('mcpProjectLabel');
+  if(el)el.textContent=_selectedProject?'Projet: '+_selectedProject:'Tous les projets';
+}
 
 // Tab navigation
 function showTab(name){
@@ -2066,8 +2400,54 @@ function showTab(name){
   const tab=document.getElementById('tab-'+name);
   if(tab)tab.classList.add('active');
   event.target.classList.add('active');
+  refreshActiveTab();
 }
 const SCHEMAS=${JSON.stringify(schemas.map(s => ({ name: s.name, collection: s.collection })))};
+
+${getReplicatorTabScript()}
+
+// ── Dashboard: refresh config for selected project ──
+async function refreshDashboard(){
+  const project=_selectedProject;
+  if(!project||project==='default'){
+    // Restore default config from process.env (reload page values)
+    document.getElementById('dialectSelect').value='${dialect}';
+    document.getElementById('dialectUri').value='${dbUri}';
+    onDialectChange();
+    return;
+  }
+  // Fetch project details for non-default
+  try{
+    const res=await fetch(BASE+'/api/projects');
+    const projects=await res.json();
+    const p=projects.find(pr=>pr.name===project);
+    if(!p)return;
+    document.getElementById('dialectSelect').value=p.dialect||'sqlite';
+    document.getElementById('dialectUri').value=p.uri||'';
+    onDialectChange();
+  }catch(e){}
+}
+
+// ── Admin: refresh entities for selected project ──
+function refreshAdminEntities(){
+  const project=_selectedProject;
+  const sel=document.getElementById('exEntity');
+  if(!sel)return;
+  if(!project||project==='default'){
+    // Restore default entities from SCHEMAS
+    sel.innerHTML='';
+    for(const s of SCHEMAS){
+      sel.innerHTML+='<option value="'+s.name+'">'+s.name+'</option>';
+    }
+    return;
+  }
+  const p=_projectsCache.find(pr=>pr.name===project);
+  if(!p||!p.schemas)return;
+  sel.innerHTML='';
+  for(const s of p.schemas){
+    sel.innerHTML+='<option value="'+s+'">'+s+' ('+project+')</option>';
+  }
+}
 
 // ── Projects management ──
 async function loadProjects(){
@@ -2082,7 +2462,9 @@ async function loadProjects(){
     for(const p of projects){
       const icon=statusIcon[p.status]||'⚪';
       const schemas=p.schemas?.join(', ')||'-';
-      html+='<tr style="border-bottom:1px solid #1e293b">';
+      const isSelected=p.name===_selectedProject;
+      const rowBg=isSelected?'background:#1e3a5f;border-left:3px solid #38bdf8;':'';
+      html+='<tr style="border-bottom:1px solid #1e293b;cursor:pointer;'+rowBg+'" onclick="selectProjectFromTable(&quot;'+p.name+'&quot;)">';
       html+='<td style="padding:.4rem">'+icon+'</td>';
       html+='<td style="padding:.4rem;font-weight:600">'+p.name+'</td>';
       html+='<td style="padding:.4rem;color:#94a3b8">'+p.dialect+'</td>';
@@ -2093,7 +2475,10 @@ async function loadProjects(){
         html+='<button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#3b82f6" onclick="editProject(&quot;'+p.name+'&quot;)">✎</button> ';
         html+='<button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#ef4444" onclick="deleteProject(&quot;'+p.name+'&quot;)">✕</button> ';
       }
-      html+='<button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#22c55e" onclick="testProject(&quot;'+p.name+'&quot;)">Test</button>';
+      html+='<button class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#22c55e" onclick="testProject(&quot;'+p.name+'&quot;)">Test</button> ';
+      if(p.name!=='default'){
+        html+='<a class="btn" style="font-size:.7rem;padding:.2rem .5rem;background:#8b5cf6;text-decoration:none" href="/'+p.name+'/" target="_blank">Ouvrir</a>';
+      }
       html+='</td></tr>';
       // Routing info
       if(p.name!=='default'){
@@ -2109,6 +2494,16 @@ async function loadProjects(){
     el.innerHTML=html;
   }catch(e){document.getElementById('projectsTable').innerHTML='<span style="color:#f87171">Erreur: '+e.message+'</span>';}
 }
+function selectProjectFromTable(name){
+  _selectedProject=name;
+  document.getElementById('globalProject').value=name;
+  updateGlobalProjectStatus();
+  loadProjects();
+  loadConfigTree();
+  loadSchemaElectro();
+  loadPerf();
+}
+
 const P_DIALECT_INFO={
   postgres:{hint:'postgresql://user:pass@localhost:5432/dbname',port:5432,type:'SQL'},
   mysql:{hint:'mysql://user:pass@localhost:3306/dbname',port:3306,type:'SQL'},
@@ -2185,8 +2580,8 @@ async function addProject(){
   const batchSize=parseInt(document.getElementById('pBatchSize').value)||100;
   const schemasRaw=document.getElementById('pSchemasJson').value.trim();
   const st=document.getElementById('pStatus');
-  if(!name||!uri){st.textContent='Nom et URI requis';st.style.color='#f87171';return;}
   const isEdit=!!editingProject;
+  if(!name||(!uri&&!isEdit)){st.textContent='Nom et URI requis';st.style.color='#f87171';return;}
   st.textContent=isEdit?'Modification en cours...':'Ajout en cours...';st.style.color='#94a3b8';
   // Parse schemas
   let schemas=undefined;
@@ -2195,7 +2590,9 @@ async function addProject(){
   } else if(schemasRaw&&!schemasRaw.startsWith('[')){
     schemas=schemasRaw; // path string
   }
-  const body={name,dialect,uri,description:desc,schemaStrategy:strategy,showSql,formatSql,pool:{min:poolMin,max:poolMax},poolSize,batchSize};
+  const body={name,dialect,description:desc,schemaStrategy:strategy,showSql,formatSql,pool:{min:poolMin,max:poolMax},poolSize,batchSize};
+  // Only send URI if user entered a new one (not masked)
+  if(uri&&!uri.includes('***'))body.uri=uri;
   if(schemas)body.schemas=schemas;
   try{
     const url=isEdit?BASE+'/api/projects/'+encodeURIComponent(editingProject):BASE+'/api/projects';
@@ -2225,15 +2622,22 @@ async function editProject(name){
     const projects=await res.json();
     const p=projects.find(pr=>pr.name===name);
     if(!p)return alert('Projet non trouve');
-    // Open the form
+    // Open the form and fill ALL fields
     document.getElementById('addProjectForm').open=true;
     document.getElementById('pName').value=p.name;
     document.getElementById('pName').disabled=true;
-    document.getElementById('pDialect').value=p.dialect;
+    document.getElementById('pDialect').value=p.dialect||p.dialectType||'postgres';
     onPDialectChange();
-    // We don't have the raw URI — user must re-enter or keep
-    document.getElementById('pUri').placeholder='Entrez la nouvelle URI ou gardez l\\'actuelle';
-    document.getElementById('pSchemasJson').value=JSON.stringify(p.schemas||[]);
+    document.getElementById('pUri').value=p.uriMasked||'';
+    document.getElementById('pUri').placeholder=p.uriMasked||'Entrez l\\'URI de connexion';
+    document.getElementById('pDesc').value=p.description||'';
+    document.getElementById('pStrategy').value=p.schemaStrategy||'update';
+    document.getElementById('pShowSql').value=p.showSql?'true':'false';
+    document.getElementById('pFormatSql').value=p.formatSql?'true':'false';
+    document.getElementById('pPoolMin').value=p.poolMin||2;
+    document.getElementById('pPoolMax').value=p.poolMax||20;
+    document.getElementById('pPoolSize').value=p.poolMax||10;
+    document.getElementById('pSchemasJson').value=p.schemasCount>0?(p.schemasCount+' schemas charges — re-uploadez pour modifier'):'';
     editingProject=name;
     document.getElementById('pSubmitBtn').textContent='Modifier le projet';
     document.getElementById('pStatus').textContent='Mode modification: '+name;
@@ -2241,8 +2645,24 @@ async function editProject(name){
   }catch(e){alert(e.message);}
 }
 async function deleteProject(name){
-  if(!confirm('Supprimer le projet "'+name+'" ?'))return;
-  try{await fetch(BASE+'/api/projects/'+name,{method:'DELETE'});loadProjects();}catch(e){alert(e.message);}
+  const deleteSchema=confirm('Supprimer le projet "'+name+'" ?\\n\\nSupprimer aussi le fichier schemas/'+name+'.json ?');
+  if(!deleteSchema&&!confirm('Supprimer le projet "'+name+'" (sans le fichier schema) ?'))return;
+  const deleteDb=confirm('Supprimer aussi la base de donnees "'+name+'" ?\\n\\n⚠️ Cette action est irreversible !');
+  try{
+    const params=new URLSearchParams();
+    if(deleteSchema)params.set('deleteSchema','true');
+    if(deleteDb)params.set('deleteDb','true');
+    const res=await fetch(BASE+'/api/projects/'+name+'?'+params.toString(),{method:'DELETE'});
+    const data=await res.json();
+    if(data.ok){
+      let msg='✅ Projet "'+name+'" supprime';
+      if(data.schemaDeleted)msg+='\\n📄 Fichier schema supprime';
+      if(data.dbDropped)msg+='\\n💾 Base de donnees supprimee';
+      alert(msg);
+    }else{alert('❌ '+(data.error||'Erreur'));}
+    loadProjects();
+    loadGlobalProjectDropdown();
+  }catch(e){alert(e.message);}
 }
 async function testProject(name){
   try{
@@ -2257,6 +2677,20 @@ async function loadConfigTree(){
     const res=await fetch(BASE+'/api/config-tree');
     const {tree}=await res.json();
     const el=document.getElementById('configTree');
+    const project=_selectedProject;
+    // If a non-default project is selected, build a project-specific tree
+    if(project&&project!=='default'){
+      const p=(tree.projects||[]).find(pr=>pr.name===project);
+      if(p){
+        const projectTree={
+          database:{dialect:p.dialect||'?',uri:p.uri||'—',schemasCount:p.schemasCount||0,schemas:p.schemas||[],status:p.status||'unknown',poolMax:p.poolMax||10},
+          transports:tree.transports||{},
+        };
+        el.innerHTML='<div style="margin-bottom:.5rem;font-size:.8rem;color:#38bdf8;font-weight:600">Projet: '+project+'</div>'+renderTree(projectTree,'projects.'+project);
+        return;
+      }
+    }
+    // Default: show global tree
     el.innerHTML=renderTree(tree,'');
   }catch(e){document.getElementById('configTree').innerHTML='<span style="color:#f87171">'+e.message+'</span>';}
 }
@@ -2405,20 +2839,6 @@ async function loadPerf(){
 
 // ── MCP Agent Simulator ──
 let mcpLog=[];
-// Populate project dropdown
-async function mcpLoadProjectDropdown(){
-  try{
-    const res=await fetch(BASE+'/api/projects');
-    const projects=await res.json();
-    const sel=document.getElementById('mcpProject');
-    sel.innerHTML='<option value="">Tous les projets</option>';
-    for(const p of projects){
-      const icon=p.status==='connected'?'🟢':p.status==='error'?'🔴':'⚪';
-      sel.innerHTML+='<option value="'+p.name+'">'+icon+' '+p.name+' ('+p.dialect+', '+p.schemasCount+' schemas)</option>';
-    }
-  }catch(e){}
-}
-setTimeout(mcpLoadProjectDropdown,600);
 function mcpAddLog(dir,data){
   const ts=new Date().toLocaleTimeString();
   mcpLog.unshift({ts,dir,data});
@@ -2439,7 +2859,7 @@ async function mcpLoadTools(){
   try{
     const res=await fetch(BASE+'/api/mcp-agent/tools');
     let tools=await res.json();
-    const selectedProject=document.getElementById('mcpProject').value;
+    const selectedProject=_selectedProject;
     // Filter by project
     if(selectedProject){
       tools=tools.filter(t=>{
@@ -2528,7 +2948,7 @@ function mcpSelectPrompt(name){
   document.getElementById('mcpResult').style.color='#a78bfa';
 }
 async function mcpLoadProjectTree(){
-  const selectedProject=document.getElementById('mcpProject').value;
+  const selectedProject=_selectedProject;
   if(!selectedProject){
     document.getElementById('mcpToolList').innerHTML='<span style="color:#f87171">Selectionnez un projet d\\'abord</span>';
     return;
@@ -2609,6 +3029,7 @@ async function mcpCallTool(){
 }
 
 // Load all on page load
+setTimeout(loadGlobalProjectDropdown,100);
 setTimeout(loadProjects,200);
 setTimeout(loadConfigTree,300);
 setTimeout(loadSchemaElectro,400);
@@ -2636,16 +3057,18 @@ async function doExplore(){
   let url='',method='GET',reqBody=null;
   const headers={'Content-Type':'application/json'};
   if(apiKey)headers['Authorization']='Bearer '+apiKey;
+  // Project-aware REST prefix
+  const projectPrefix=(_selectedProject&&_selectedProject!=='default')?_selectedProject+'/':'';
 
   try{
     if(transport==='rest'){
       switch(op){
-        case 'findAll':url=BASE+'/api/v1/'+col;break;
-        case 'findById':url=BASE+'/api/v1/'+col+'/'+id;break;
-        case 'count':url=BASE+'/api/v1/'+col+'/count';break;
-        case 'create':url=BASE+'/api/v1/'+col;method='POST';reqBody=body||'{}';break;
-        case 'update':url=BASE+'/api/v1/'+col+'/'+id;method='PUT';reqBody=body||'{}';break;
-        case 'delete':url=BASE+'/api/v1/'+col+'/'+id;method='DELETE';break;
+        case 'findAll':url=BASE+'/api/v1/'+projectPrefix+col;break;
+        case 'findById':url=BASE+'/api/v1/'+projectPrefix+col+'/'+id;break;
+        case 'count':url=BASE+'/api/v1/'+projectPrefix+col+'/count';break;
+        case 'create':url=BASE+'/api/v1/'+projectPrefix+col;method='POST';reqBody=body||'{}';break;
+        case 'update':url=BASE+'/api/v1/'+projectPrefix+col+'/'+id;method='PUT';reqBody=body||'{}';break;
+        case 'delete':url=BASE+'/api/v1/'+projectPrefix+col+'/'+id;method='DELETE';break;
       }
     }else if(transport==='graphql'){
       url=BASE+'/graphql';method='POST';
@@ -3083,6 +3506,7 @@ async function doDropTables(){
     }
   }catch(e){el.innerHTML='<span style="color:#ef4444">❌ '+e.message+'</span>'}
 }
+${getHelpTabScript()}
 </script>
 </body>
 </html>`;

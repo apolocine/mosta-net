@@ -1,0 +1,38 @@
+[
+  {
+    "name": "User",
+    "collection": "users",
+    "fields": {
+      "email": { "type": "string", "required": true },
+      "name": { "type": "string", "required": true },
+      "age": { "type": "number", "default": 0 },
+      "active": { "type": "boolean", "default": true }
+    },
+    "relations": {},
+    "indexes": []
+  },
+  {
+    "name": "Product",
+    "collection": "products",
+    "fields": {
+      "title": { "type": "string", "required": true },
+      "price": { "type": "number", "required": true },
+      "stock": { "type": "number", "default": 0 },
+      "category": { "type": "string" }
+    },
+    "relations": {},
+    "indexes": []
+  },
+  {
+    "name": "Order",
+    "collection": "orders",
+    "fields": {
+      "userId": { "type": "string", "required": true },
+      "total": { "type": "number", "required": true },
+      "status": { "type": "string", "default": "pending" },
+      "createdAt": { "type": "date" }
+    },
+    "relations": {},
+    "indexes": []
+  }
+]
