@@ -1,0 +1,808 @@
+{
+  "payload": {
+    "type": "hosted",
+    "stateful": false,
+    "hasAuthAdapter": false,
+    "serverCard": {
+      "serverInfo": {
+        "name": "OctoNet MCP",
+        "version": "2.0.42"
+      },
+      "tools": [
+        {
+          "name": "User_findAll",
+          "description": "findAll on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_findById",
+          "description": "findById on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_create",
+          "description": "create on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_update",
+          "description": "update on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_delete",
+          "description": "delete on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_count",
+          "description": "count on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_findOne",
+          "description": "findOne on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_search",
+          "description": "search on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_upsert",
+          "description": "upsert on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_deleteMany",
+          "description": "deleteMany on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_updateMany",
+          "description": "updateMany on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_aggregate",
+          "description": "aggregate on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_addToSet",
+          "description": "addToSet on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_pull",
+          "description": "pull on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "User_increment",
+          "description": "increment on User entities (fields: email, name, age, active)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_findAll",
+          "description": "findAll on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_findById",
+          "description": "findById on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_create",
+          "description": "create on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_update",
+          "description": "update on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_delete",
+          "description": "delete on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_count",
+          "description": "count on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_findOne",
+          "description": "findOne on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_search",
+          "description": "search on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_upsert",
+          "description": "upsert on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_deleteMany",
+          "description": "deleteMany on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_updateMany",
+          "description": "updateMany on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_aggregate",
+          "description": "aggregate on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_addToSet",
+          "description": "addToSet on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_pull",
+          "description": "pull on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Product_increment",
+          "description": "increment on Product entities (fields: title, price, stock, category)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_findAll",
+          "description": "findAll on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_findById",
+          "description": "findById on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_create",
+          "description": "create on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_update",
+          "description": "update on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_delete",
+          "description": "delete on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_count",
+          "description": "count on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_findOne",
+          "description": "findOne on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_search",
+          "description": "search on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_upsert",
+          "description": "upsert on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_deleteMany",
+          "description": "deleteMany on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_updateMany",
+          "description": "updateMany on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_aggregate",
+          "description": "aggregate on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_addToSet",
+          "description": "addToSet on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_pull",
+          "description": "pull on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        },
+        {
+          "name": "Order_increment",
+          "description": "increment on Order entities (fields: userId, total, status, createdAt)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filter": {
+                "description": "JSON filter",
+                "type": "string"
+              }
+            },
+            "$schema": "http://json-schema.org/draft-07/schema#"
+          },
+          "execution": {
+            "taskSupport": "forbidden"
+          }
+        }
+      ],
+      "resources": [],
+      "prompts": [
+        {
+          "name": "describe-schema",
+          "description": "Describe all entities, fields, relations"
+        },
+        {
+          "name": "suggest-query",
+          "description": "Help build a filter query"
+        },
+        {
+          "name": "explain-data",
+          "description": "Explain query results in plain language"
+        },
+        {
+          "name": "list-entities",
+          "description": "Quick entity overview"
+        }
+      ]
+    },
+    "source": {
+      "commit": "4ea3816ee099208c2b9fed745d4c2d31e71fd84d",
+      "branch": "multi-set"
+    }
+  },
+  "artifacts": {
+    "module": "module.js",
+    "sourcemap": "module.js.map"
+  },
+  "name": "octonet-mcp"
+}
