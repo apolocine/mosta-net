@@ -3,6 +3,13 @@ dist/
 *.tgz
 .env
 .env.local
-.mosta/
+.next/
+out/
+docs/
+examples/
+jar_files/
+orm-scripts-tests/
+test-scripts/
 package-lock.json
-src/server.ts.backup
+hjar/
+octonet-transports/
