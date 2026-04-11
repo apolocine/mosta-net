@@ -1,0 +1,28 @@
+{
+  "subscriptions": [
+    {
+      "name": "Enseignement_sup01",
+      "key": "msk_test_pptVpRsWbgwQct9vBkbGTGzHT4S0SVzZ",
+      "hash": "656a21c3f3a3773e061b865d13a807380de575cc6573df36e2322e19542d9053",
+      "created": "2026-03-22",
+      "status": "active",
+      "permissions": {
+        "*": {
+          "*": "crud"
+        }
+      }
+    },
+    {
+      "name": "Teacher_01",
+      "key": "msk_live_b7XnGXhcbfjBsce2-52wVuX8DtsomGJv",
+      "hash": "736eb1583ecb190fc2745fff584e76b4e725421d3a0995179bc49d9d19e7e1fd",
+      "created": "2026-03-22",
+      "status": "active",
+      "permissions": {
+        "*": {
+          "*": "crud"
+        }
+      }
+    }
+  ]
+}
