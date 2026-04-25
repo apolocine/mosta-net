@@ -1,8 +1,9 @@
 // @mostajs/net — Configuration loader
-// Reads MOSTA_NET_* from process.env (populated by .env.local)
+// Reads MOSTA_NET_* via @mostajs/config (profile cascade-aware)
 // Author: Dr Hamid MADANI drmdh@msn.com
 
 import type { NetServerConfig, TransportConfig } from './types.js';
+import { getEnv, getEnvBool, getEnvNumber } from '@mostajs/config';
 
 /** All known transport names */
 export const TRANSPORT_NAMES = [
@@ -40,27 +41,27 @@ const DEFAULT_TRANSPORT_PATHS: Partial<Record<TransportName, string>> = {
  * Example: MOSTA_NET_REST_ENABLED=true, MOSTA_NET_GRPC_PORT=50051
  */
 export function loadNetConfig(): NetServerConfig {
-  const port = parseInt(process.env.MOSTA_NET_PORT || '', 10) || DEFAULT_PORT;
+  const port = getEnvNumber('MOSTA_NET_PORT', DEFAULT_PORT);
 
   const transports: Record<string, TransportConfig> = {};
 
   for (const name of TRANSPORT_NAMES) {
     const upper = name.toUpperCase();
-    const enabled = process.env[`MOSTA_NET_${upper}_ENABLED`] === 'true';
+    const enabled = getEnvBool(`MOSTA_NET_${upper}_ENABLED`, false);
 
     transports[name] = {
       enabled,
-      port: parseInt(process.env[`MOSTA_NET_${upper}_PORT`] || '', 10) || DEFAULT_TRANSPORT_PORTS[name],
-      path: process.env[`MOSTA_NET_${upper}_PATH`] || DEFAULT_TRANSPORT_PATHS[name],
+      port: getEnvNumber(`MOSTA_NET_${upper}_PORT`, DEFAULT_TRANSPORT_PORTS[name] as number),
+      path: getEnv(`MOSTA_NET_${upper}_PATH`, DEFAULT_TRANSPORT_PATHS[name] as string),
       options: {},
     };
 
     // Transport-specific options
     if (name === 'mcp') {
-      transports[name].options!.mode = process.env.MOSTA_NET_MCP_MODE || 'http';
+      transports[name].options!.mode = getEnv('MOSTA_NET_MCP_MODE', 'http');
     }
     if (name === 'nats') {
-      transports[name].options!.url = process.env.MOSTA_NET_NATS_URL || 'nats://localhost:4222';
+      transports[name].options!.url = getEnv('MOSTA_NET_NATS_URL', 'nats://localhost:4222');
     }
   }
 

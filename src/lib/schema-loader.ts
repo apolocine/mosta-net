@@ -5,6 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { EntitySchema } from '@mostajs/orm';
+import { getEnv } from '@mostajs/config';
 
 /**
  * Load schemas from schemas.json file
@@ -165,7 +166,7 @@ export function getSchemasConfig(): {
   schemas: { name: string; collection: string; fieldsCount: number; relationsCount: number }[];
 } {
   const schemasJsonPath = path.resolve(process.cwd(), 'schemas.json');
-  const schemasPath = process.env.SCHEMAS_PATH || '';
+  const schemasPath = getEnv('SCHEMAS_PATH', '');
   let schemas: EntitySchema[] = [];
 
   if (fs.existsSync(schemasJsonPath)) {

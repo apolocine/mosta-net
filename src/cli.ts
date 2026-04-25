@@ -83,10 +83,11 @@ async function main() {
         const a = cliArgs.find(a => a.startsWith(`--${name}=`));
         return a ? a.split('=').slice(1).join('=') : undefined;
       };
-      const d = getArg('dialect') || process.env.DB_DIALECT;
-      const u = getArg('uri') || process.env.SGBD_URI;
-      const port = getArg('port') || process.env.MOSTA_NET_PORT || '4488';
-      const projects = getArg('projects') || process.env.MOSTA_PROJECTS;
+      const { getEnv } = await import('@mostajs/config');
+      const d = getArg('dialect') || getEnv('DB_DIALECT');
+      const u = getArg('uri') || getEnv('SGBD_URI');
+      const port = getArg('port') || getEnv('MOSTA_NET_PORT', '4488');
+      const projects = getArg('projects') || getEnv('MOSTA_PROJECTS');
 
       if (!d || !u) {
         console.log(`

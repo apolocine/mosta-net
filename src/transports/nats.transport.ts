@@ -5,6 +5,7 @@
 
 import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
 import type { ITransport, TransportConfig, TransportInfo, TransportMiddleware, TransportContext } from '../core/types.js';
+import { getEnv } from '@mostajs/config';
 
 type OrmHandler = (req: OrmRequest, ctx: TransportContext) => Promise<OrmResponse>;
 
@@ -32,7 +33,7 @@ export class NatsTransport implements ITransport {
     this.config = config;
     this.stats.startedAt = Date.now();
 
-    const natsUrl = config.options?.url as string || process.env.NATS_URL || 'nats://localhost:4222';
+    const natsUrl = (config.options?.url as string) || getEnv('NATS_URL', 'nats://localhost:4222');
 
     try {
       const nats = await import('nats');

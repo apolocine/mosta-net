@@ -25,9 +25,11 @@ interface ProjectManagerLike {
   hasProject(name: string): boolean
 }
 
-const TRIAL_TTL_DAYS  = 7
-const TRIAL_RATE_LIMIT_PER_HOUR = 10
-const TRIAL_DATA_DIR  = process.env.OCTONET_TRIAL_DATA_DIR || './data/trials'
+import { getEnv, getEnvNumber } from '@mostajs/config'
+
+const TRIAL_TTL_DAYS  = getEnvNumber('OCTONET_TRIAL_TTL_DAYS', 7)
+const TRIAL_RATE_LIMIT_PER_HOUR = getEnvNumber('OCTONET_TRIAL_RATE_LIMIT_PER_HOUR', 10)
+const TRIAL_DATA_DIR  = getEnv('OCTONET_TRIAL_DATA_DIR', './data/trials')
 
 // In-memory rate limiter — Map<ip, {count, resetAt}>
 const _rateLimit = new Map<string, { count: number; resetAt: number }>()
@@ -63,7 +65,7 @@ async function loadDemoSchemas(): Promise<any[]> {
   try {
     const fs = await import('node:fs')
     const path = await import('node:path')
-    const schemasFile = process.env.MOSTA_TRIAL_SCHEMAS || 'schemas.json'
+    const schemasFile = getEnv('MOSTA_TRIAL_SCHEMAS', 'schemas.json')
     const fullPath = path.resolve(process.cwd(), schemasFile)
     if (fs.existsSync(fullPath)) {
       return JSON.parse(fs.readFileSync(fullPath, 'utf-8'))

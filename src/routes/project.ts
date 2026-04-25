@@ -7,6 +7,7 @@ import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
 import type { TransportContext } from '../core/types.js';
 import { McpTransport } from '../transports/mcp.transport.js';
 import { randomBytes, scryptSync } from 'crypto';
+import { getEnv } from '@mostajs/config';
 
 /** Hash password — uses bcryptjs if available, falls back to scrypt */
 async function hashPassword(plain: string): Promise<string> {
@@ -234,7 +235,7 @@ export function registerProjectRoutes(
       try {
         const fs = await import('fs');
         const { resolve: resolvePath } = await import('path');
-        const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+        const treePath = resolvePath(process.cwd(), getEnv('MOSTA_PROJECTS', 'projects-tree.json'));
         const tree = fs.existsSync(treePath) ? JSON.parse(fs.readFileSync(treePath, 'utf-8')) : {};
         const schemaFile = 'schemas/' + project + '.json';
         if (!tree[project]) tree[project] = {};
@@ -411,7 +412,7 @@ export function registerProjectRoutes(
       try {
         const fs = await import('fs');
         const { resolve: resolvePath } = await import('path');
-        const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+        const treePath = resolvePath(process.cwd(), getEnv('MOSTA_PROJECTS', 'projects-tree.json'));
         const tree = fs.existsSync(treePath) ? JSON.parse(fs.readFileSync(treePath, 'utf-8')) : {};
         const projConf = tree[project];
         if (!projConf?.dialect || !projConf?.uri) return { ok: false, error: 'Project config missing dialect/uri in projects-tree.json' };

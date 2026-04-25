@@ -27,6 +27,7 @@ import { registerProjectRoutes } from './routes/project.js';
 import { GrpcTransport } from './transports/grpc.transport.js';
 import { NatsTransport } from './transports/nats.transport.js';
 import { ArrowFlightTransport } from './transports/arrow.transport.js';
+import { getEnv, getEnvBool, getEnvNumber } from '@mostajs/config';
 
 export interface NetServer {
   app: FastifyInstance;
@@ -62,7 +63,7 @@ export async function startServer(): Promise<NetServer> {
   let dbError = '';
 
   try {
-    if (!process.env.DB_DIALECT || !process.env.SGBD_URI) {
+    if (!getEnv('DB_DIALECT') || !getEnv('SGBD_URI')) {
       throw new Error('DB_DIALECT et SGBD_URI non configurés — utilisez l\'IHM pour choisir un dialecte');
     }
     dialect = await getDialect();
@@ -96,15 +97,15 @@ export async function startServer(): Promise<NetServer> {
       console.log(`  Loaded ${schemas.length} schemas from schemas.json`);
     }
   }
-  if (schemas.length === 0 && process.env.SCHEMAS_PATH) {
+  if (schemas.length === 0 && getEnv('SCHEMAS_PATH')) {
     // Try scanning directories from SCHEMAS_PATH
-    const fromDirs = scanSchemaDirs(process.env.SCHEMAS_PATH);
+    const fromDirs = scanSchemaDirs(getEnv('SCHEMAS_PATH', ''));
     if (fromDirs.length > 0) {
       registerSchemas(fromDirs);
       schemas = fromDirs;
       // Auto-generate schemas.json for next time
       generateSchemasJson(fromDirs);
-      console.log(`  Scanned ${schemas.length} schemas from ${process.env.SCHEMAS_PATH} → saved schemas.json`);
+      console.log(`  Scanned ${schemas.length} schemas from ${getEnv('SCHEMAS_PATH')} → saved schemas.json`);
     }
   }
 
@@ -197,7 +198,7 @@ export async function startServer(): Promise<NetServer> {
   }
 
   // 4d. Load additional projects + enable auto-persistence
-  const projectsFile = process.env.MOSTA_PROJECTS || 'projects-tree.json';
+  const projectsFile = getEnv('MOSTA_PROJECTS', 'projects-tree.json');
   pm.enableAutoPersist(projectsFile);
 
   try {
@@ -215,7 +216,7 @@ export async function startServer(): Promise<NetServer> {
   try {
     const { ReplicationManager } = await import('@mostajs/replicator');
     rm = new ReplicationManager(pm as any);
-    const replicaFile = process.env.MOSTA_REPLICAS || 'replicator-tree.json';
+    const replicaFile = getEnv('MOSTA_REPLICAS', 'replicator-tree.json');
     rm.enableAutoPersist(replicaFile);
     try {
       const { existsSync } = await import('fs');
@@ -238,15 +239,15 @@ export async function startServer(): Promise<NetServer> {
 
   // 5. Display startup banner
   const C = { reset: '\x1b[0m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m', yellow: '\x1b[33m', magenta: '\x1b[35m', gray: '\x1b[90m', blue: '\x1b[34m' };
-  const maskedUri = (process.env.SGBD_URI || '').replace(/:([^@]+)@/, ':***@');
+  const maskedUri = getEnv('SGBD_URI', '').replace(/:([^@]+)@/, ':***@');
   console.log(`
 ${C.cyan}┌─────────────────────────────────────────────────────┐${C.reset}
 ${C.cyan}│${C.reset}  ${C.cyan}@mostajs/net${C.reset}                                        ${C.cyan}│${C.reset}
-${C.cyan}│${C.reset}  Dialect:    ${C.green}${process.env.DB_DIALECT || 'unknown'}${C.reset} ${C.dim}(${maskedUri})${C.reset}
+${C.cyan}│${C.reset}  Dialect:    ${C.green}${getEnv('DB_DIALECT', 'unknown')}${C.reset} ${C.dim}(${maskedUri})${C.reset}
 ${C.cyan}│${C.reset}  Entities:   ${C.green}${schemas.map(s => s.name).join(', ')}${C.reset} ${C.dim}(${schemas.length})${C.reset}
 ${C.cyan}│${C.reset}  Port:       ${C.yellow}${config.port}${C.reset}
-${C.cyan}│${C.reset}  Show SQL:   ${process.env.DB_SHOW_SQL === 'true' ? C.green + 'true' : C.gray + 'false'}${C.reset}  Format: ${process.env.DB_FORMAT_SQL === 'true' ? C.green + 'true' : C.gray + 'false'}${C.reset}  Highlight: ${process.env.DB_HIGHLIGHT_SQL === 'true' ? C.green + 'true' : C.gray + 'false'}${C.reset}
-${C.cyan}│${C.reset}  Pool:       ${C.yellow}${process.env.DB_POOL_SIZE || '10'}${C.reset}  Strategy: ${C.yellow}${process.env.DB_SCHEMA_STRATEGY || 'none'}${C.reset}
+${C.cyan}│${C.reset}  Show SQL:   ${getEnvBool('DB_SHOW_SQL') ? C.green + 'true' : C.gray + 'false'}${C.reset}  Format: ${getEnvBool('DB_FORMAT_SQL') ? C.green + 'true' : C.gray + 'false'}${C.reset}  Highlight: ${getEnvBool('DB_HIGHLIGHT_SQL') ? C.green + 'true' : C.gray + 'false'}${C.reset}
+${C.cyan}│${C.reset}  Pool:       ${C.yellow}${getEnvNumber('DB_POOL_SIZE', 10)}${C.reset}  Strategy: ${C.yellow}${getEnv('DB_SCHEMA_STRATEGY', 'none')}${C.reset}
 ${C.cyan}│${C.reset}  Transports: ${C.green}${getEnabledTransports(config).join(', ')}${C.reset} ${C.dim}(${getEnabledTransports(config).length})${C.reset}
 ${C.cyan}└─────────────────────────────────────────────────────┘${C.reset}
 `);
@@ -272,8 +273,8 @@ ${C.cyan}└──────────────────────�
     requestsPerSecond: 0,
     perClient: new Map<string, { count: number; lastReset: number }>(),
     perProject: new Map<string, { count: number; errors: number; latencies: number[] }>(),
-    rateLimitPerClient: parseInt(process.env.MOSTA_RATE_LIMIT_CLIENT || '1000'),  // req/min
-    rateLimitPerProject: parseInt(process.env.MOSTA_RATE_LIMIT_PROJECT || '10000'), // req/min
+    rateLimitPerClient: getEnvNumber('MOSTA_RATE_LIMIT_CLIENT', 1000),  // req/min
+    rateLimitPerProject: getEnvNumber('MOSTA_RATE_LIMIT_PROJECT', 10000), // req/min
     rejected: 0,
   };
 
@@ -825,7 +826,7 @@ ${C.cyan}└──────────────────────�
 
   app.post('/api/scan-schemas', async (req) => {
     const body = req.body as { path?: string };
-    const scanPath = body?.path || process.env.SCHEMAS_PATH || '';
+    const scanPath = body?.path || getEnv('SCHEMAS_PATH', '');
     if (!scanPath) return { error: 'No path provided. Set SCHEMAS_PATH in .env.local or provide path in body.' };
     const found = scanSchemaDirs(scanPath);
     return { ok: true, count: found.length, schemas: found.map(s => ({ name: s.name, collection: s.collection, fieldsCount: Object.keys(s.fields).length })) };
@@ -833,7 +834,7 @@ ${C.cyan}└──────────────────────�
 
   app.post('/api/generate-schemas', async (req) => {
     const body = req.body as { path?: string };
-    const scanPath = body?.path || process.env.SCHEMAS_PATH || '';
+    const scanPath = body?.path || getEnv('SCHEMAS_PATH', '');
     if (!scanPath) return { error: 'No path provided.' };
     const found = scanSchemaDirs(scanPath);
     if (found.length === 0) return { error: 'No schemas found in ' + scanPath };
@@ -1097,10 +1098,10 @@ ${C.cyan}└──────────────────────�
       entityService = null;
 
       // 3. Try reconnect with new config (non-blocking)
-      const newDialect = process.env.DB_DIALECT || 'unknown';
-      const newUri = (process.env.SGBD_URI || '').replace(/:([^@]+)@/, ':***@');
+      const newDialect = getEnv('DB_DIALECT', 'unknown');
+      const newUri = getEnv('SGBD_URI', '').replace(/:([^@]+)@/, ':***@');
       try {
-        if (process.env.DB_DIALECT && process.env.SGBD_URI) {
+        if (getEnv('DB_DIALECT') && getEnv('SGBD_URI')) {
           dialect = await getDialect();
           entityService = new EntityService(dialect);
           const currentSchemas = getAllSchemas();
@@ -1124,8 +1125,8 @@ ${C.cyan}└──────────────────────�
   app.post('/api/create-database', async (req) => {
     const body = req.body as { name?: string; dialect?: string; uri?: string } | null;
     // Use body values if provided (from project form), fallback to env (default project)
-    const dbDialect = body?.dialect || process.env.DB_DIALECT || '';
-    const uri = body?.uri || process.env.SGBD_URI || '';
+    const dbDialect = body?.dialect || getEnv('DB_DIALECT', '');
+    const uri = body?.uri || getEnv('SGBD_URI', '');
     if (!dbDialect || !uri) return { ok: false, error: 'dialect et uri requis' };
     try {
       const { createDatabase } = await import('@mostajs/orm');
@@ -1187,7 +1188,7 @@ ${C.cyan}└──────────────────────�
     const { readFileSync, existsSync } = await import('fs');
     const { resolve: resolvePath } = await import('path');
     // Read projects-tree.json for persisted config (uri, strategy, description)
-    const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+    const treePath = resolvePath(process.cwd(), getEnv('MOSTA_PROJECTS', 'projects-tree.json'));
     let tree: Record<string, any> = {};
     try { tree = JSON.parse(readFileSync(treePath, 'utf-8')); } catch {}
     // Enrich with ProjectContext + persisted config
@@ -1218,7 +1219,7 @@ ${C.cyan}└──────────────────────�
       // Persist to projects-tree.json
       const { readFileSync, writeFileSync, existsSync } = await import('fs');
       const { resolve: resolvePath } = await import('path');
-      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      const treePath = resolvePath(process.cwd(), getEnv('MOSTA_PROJECTS', 'projects-tree.json'));
       const tree = existsSync(treePath) ? JSON.parse(readFileSync(treePath, 'utf-8')) : {};
       const { name, ...config } = body;
       // Save schemas as file path reference if schemas are an array
@@ -1256,7 +1257,7 @@ ${C.cyan}└──────────────────────�
       // Persist ALL fields to projects-tree.json (including description, showSql, etc.)
       const { readFileSync, writeFileSync, existsSync } = await import('fs');
       const { resolve: resolvePath } = await import('path');
-      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      const treePath = resolvePath(process.cwd(), getEnv('MOSTA_PROJECTS', 'projects-tree.json'));
       const tree = existsSync(treePath) ? JSON.parse(readFileSync(treePath, 'utf-8')) : {};
       if (!tree[name]) tree[name] = {};
       // Merge all fields except 'name'
@@ -1289,7 +1290,7 @@ ${C.cyan}└──────────────────────�
       // Read config before removing (need URI for drop DB)
       const { readFileSync, writeFileSync, existsSync, unlinkSync } = await import('fs');
       const { resolve: resolvePath } = await import('path');
-      const treePath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+      const treePath = resolvePath(process.cwd(), getEnv('MOSTA_PROJECTS', 'projects-tree.json'));
       let projConf: any = null;
       if (existsSync(treePath)) {
         try { projConf = JSON.parse(readFileSync(treePath, 'utf-8'))[name]; } catch {}
@@ -1429,26 +1430,26 @@ ${C.cyan}└──────────────────────�
 
     const tree: Record<string, any> = {
       database: {
-        dialect: process.env.DB_DIALECT || '',
-        uri: (process.env.SGBD_URI || '').replace(/:([^@]+)@/, ':***@'),
-        schemaStrategy: process.env.DB_SCHEMA_STRATEGY || 'none',
-        showSql: process.env.DB_SHOW_SQL === 'true',
-        formatSql: process.env.DB_FORMAT_SQL === 'true',
-        highlightSql: process.env.DB_HIGHLIGHT_SQL === 'true',
-        poolSize: process.env.DB_POOL_SIZE || '10',
-        batchSize: process.env.DB_BATCH_SIZE || '100',
+        dialect: getEnv('DB_DIALECT', ''),
+        uri: getEnv('SGBD_URI', '').replace(/:([^@]+)@/, ':***@'),
+        schemaStrategy: getEnv('DB_SCHEMA_STRATEGY', 'none'),
+        showSql: getEnvBool('DB_SHOW_SQL'),
+        formatSql: getEnvBool('DB_FORMAT_SQL'),
+        highlightSql: getEnvBool('DB_HIGHLIGHT_SQL'),
+        poolSize: getEnvNumber('DB_POOL_SIZE', 10),
+        batchSize: getEnvNumber('DB_BATCH_SIZE', 100),
       },
       server: {
-        port: process.env.MOSTA_NET_PORT || '4488',
-        projectsFile: process.env.MOSTA_PROJECTS || 'projects-tree.json',
+        port: getEnvNumber('MOSTA_NET_PORT', 4488),
+        projectsFile: getEnv('MOSTA_PROJECTS', 'projects-tree.json'),
       },
       transports: {
-        rest: process.env.MOSTA_NET_REST_ENABLED === 'true',
-        graphql: process.env.MOSTA_NET_GRAPHQL_ENABLED === 'true',
-        ws: process.env.MOSTA_NET_WS_ENABLED === 'true',
-        sse: process.env.MOSTA_NET_SSE_ENABLED === 'true',
-        jsonrpc: process.env.MOSTA_NET_JSONRPC_ENABLED === 'true',
-        mcp: process.env.MOSTA_NET_MCP_ENABLED === 'true',
+        rest:    getEnvBool('MOSTA_NET_REST_ENABLED'),
+        graphql: getEnvBool('MOSTA_NET_GRAPHQL_ENABLED'),
+        ws:      getEnvBool('MOSTA_NET_WS_ENABLED'),
+        sse:     getEnvBool('MOSTA_NET_SSE_ENABLED'),
+        jsonrpc: getEnvBool('MOSTA_NET_JSONRPC_ENABLED'),
+        mcp:     getEnvBool('MOSTA_NET_MCP_ENABLED'),
       },
       projects: pm.listProjects(),
     };
@@ -1493,7 +1494,7 @@ ${C.cyan}└──────────────────────�
       const parts = body.key.replace('projects.', '').split('.');
       // parts[0] = project name, parts[1..] = property path
       if (parts.length >= 2) {
-        const projectsPath = resolvePath(process.cwd(), process.env.MOSTA_PROJECTS || 'projects-tree.json');
+        const projectsPath = resolvePath(process.cwd(), getEnv('MOSTA_PROJECTS', 'projects-tree.json'));
         let tree: Record<string, any> = {};
         try { tree = JSON.parse(readFileSync(projectsPath, 'utf-8')); } catch {}
         const projName = parts[0];
@@ -1569,8 +1570,8 @@ ${C.cyan}└──────────────────────�
   app.get('/', async (req, reply) => {
     reply.type('text/html');
     // Lire les valeurs actuelles (pas celles du démarrage)
-    const currentDialect = process.env.DB_DIALECT || 'unknown';
-    const currentUri = process.env.SGBD_URI || '';
+    const currentDialect = getEnv('DB_DIALECT', 'unknown');
+    const currentUri = getEnv('SGBD_URI', '');
     const currentMaskedUri = currentUri.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@');
     const currentSchemas = getAllSchemas();
     return getNetDashboardHtml(config.port, enabledNames, currentSchemas, currentMaskedUri, dbError, pm);
@@ -2026,7 +2027,7 @@ function registerRestRoutes(
 // ============================================================
 
 function getNetDashboardHtml(port: number, transports: string[], schemas: EntitySchema[], dbUri: string, dbErr = '', pm?: ProjectManager): string {
-  const dialect = process.env.DB_DIALECT || 'unknown';
+  const dialect = getEnv('DB_DIALECT', 'unknown');
   const entityList = schemas.map(s => s.name);
   const restEntities = schemas.map(s => `<li><a href="/api/v1/${s.collection}" target="_blank">/api/v1/${s.collection}</a> <span style="color:#94a3b8">(${s.name})</span></li>`).join('');
 
@@ -2104,7 +2105,7 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
   <!-- TAB: Dashboard -->
   <div id="tab-dashboard" class="tab-content active">
 
-  ${process.env.PORTAL_DB_URI ? `
+  ${getEnv('PORTAL_DB_URI') ? `
   <div id="cloud-banner" style="padding:1rem;margin-bottom:1rem;border-radius:8px;background:linear-gradient(90deg,#605DFF22,#5DA8FF22);border:1px solid #605DFF44">
     <div style="font-weight:700;margin-bottom:.25rem">OctoNet Cloud</div>
     <div style="font-size:.85rem;color:#94a3b8">
@@ -2119,9 +2120,9 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
     <table style="width:100%;font-size:.9rem">
       <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Dialect</td><td><b>${dialect}</b> <span class="mono">${dbUri}</span></td></tr>
       <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Port</td><td><b>${port}</b></td></tr>
-      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Pool</td><td>${process.env.DB_POOL_SIZE || '10'}</td></tr>
-      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Strategy</td><td>${process.env.DB_SCHEMA_STRATEGY || 'none'}</td></tr>
-      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Show SQL</td><td>${process.env.DB_SHOW_SQL === 'true' ? '✅' : '❌'} Format: ${process.env.DB_FORMAT_SQL === 'true' ? '✅' : '❌'} Highlight: ${process.env.DB_HIGHLIGHT_SQL === 'true' ? '✅' : '❌'}</td></tr>
+      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Pool</td><td>${getEnvNumber('DB_POOL_SIZE', 10)}</td></tr>
+      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Strategy</td><td>${getEnv('DB_SCHEMA_STRATEGY', 'none')}</td></tr>
+      <tr><td style="color:#94a3b8;padding:.3rem 1rem .3rem 0">Show SQL</td><td>${getEnvBool('DB_SHOW_SQL') ? '✅' : '❌'} Format: ${getEnvBool('DB_FORMAT_SQL') ? '✅' : '❌'} Highlight: ${getEnvBool('DB_HIGHLIGHT_SQL') ? '✅' : '❌'}</td></tr>
     </table>
     <div style="margin-top:.75rem;padding:.75rem;background:#1e293b;border-radius:6px;margin-bottom:.75rem">
       <label style="font-size:.75rem;color:#94a3b8;display:block;margin-bottom:.3rem">Changer le dialecte</label>
@@ -2437,7 +2438,7 @@ function getNetDashboardHtml(port: number, transports: string[], schemas: Entity
     <div style="display:grid;grid-template-columns:1fr auto;gap:.5rem;margin-bottom:.5rem;align-items:end">
       <div>
         <label style="font-size:.75rem;color:#94a3b8">Chemin des schemas (SCHEMAS_PATH)</label>
-        <input id="schemasPath" placeholder="./src/dal/schemas" value="${process.env.SCHEMAS_PATH || ''}"/>
+        <input id="schemasPath" placeholder="./src/dal/schemas" value="${getEnv('SCHEMAS_PATH', '')}"/>
       </div>
       <button class="btn" onclick="doScanSchemas()" style="height:36px">Scanner</button>
     </div>
