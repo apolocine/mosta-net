@@ -41,7 +41,8 @@ export {
   checkPermission,
 } from './auth/apikeys.js';
 export type { Subscription, ApiKeysFile } from './auth/apikeys.js';
-export { apiKeyMiddleware } from './auth/apikey-middleware.js';
+export { createApiKeyMiddleware } from './auth/apikey-middleware.js';
+export { createSanitizerMiddleware } from './auth/sanitizer-middleware.js';
 
 // Schema loader
 export { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip } from './lib/schema-loader.js';

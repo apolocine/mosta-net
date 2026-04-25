@@ -1,5 +1,61 @@
 # Changelog — @mostajs/net
 
+## 2.2.7 (2026-04-24) — `resolveEntity` accepts entity name AND collection name
+
+### Bug fix
+
+`GET /api/v1/User` returned a 404 `UNKNOWN_ENTITY` when the registered
+schema had `name: "User"` and `collection: "users"` (very common plural
+convention). Root cause : the global-registry fallback in
+`server.ts:resolveEntity()` only looked up by `collection` name, even
+though the project-scoped branch already accepted either form
+(`s.collection === collection || s.name === collection`).
+
+Fixed by extending the fallback to also try `getSchema(name)` when the
+collection lookup misses. The two lookups are idempotent (same entity,
+two aliases), so there is no risk of ambiguity.
+
+**Reported by** the Java integration test
+`LiveServerIntegrationTest.findAllReadsSomething` — after successful
+`uploadSchemasJson`, `findAll("User", ...)` kept returning 404 until
+this fix.
+
+### Operational impact
+
+Any client calling `/api/v1/<EntityName>` (PascalCase) now works,
+whether the entity's DB collection is `users`, `Users`, `user`, etc.
+Previously only `/api/v1/users` worked, forcing clients to know the
+internal storage convention. This aligns the REST surface with the
+behaviour developers already got from the JS/Java client helpers
+(`client.findAll('User', ...)`).
+
+## 2.2.6 (2026-04-24) — Bug fixes surfaced by the Java client
+
+### Bug fixes
+
+- **`POST /api/upload-schemas-json` no longer 500s on minimal payloads.**
+  Root cause lived in `@mostajs/orm` (`AbstractSqlDialect.generateIndexes`
+  + `validateSchemas`) — now fixed in `@mostajs/orm@1.13.1`. No change to
+  the server source here, but users on `@mostajs/net@2.0.38` must bump
+  `@mostajs/orm` to 1.13.1+.
+
+### New method on the TypeScript client (previously missing)
+
+- **`NetClient.uploadSchemasJson(schemas)`** — calls
+  `POST /api/upload-schemas-json`. Was accidentally omitted from
+  `src/client.ts` despite being the primary provisioning endpoint
+  server-side. Discovered while porting the client to Java
+  (`com.mostajs:mostajs-net-client@0.1.0`) — the Java port ships the
+  method and the TS version is catching up.
+
+### Operational note
+
+The server `process.exit(0)` after a successful upload is intentional
+(PM2 restart picks up the new schema-derived routes). Clients must
+either wait a few seconds after an `uploadSchemasJson` call or poll
+`/health` until it returns 200 again. The new Java port does this
+automatically; see `NetClient.uploadSchemasJson` JavaDoc.
+
 ## 2.0.38 (2026-04-03) — Branch `multi-set`
 
 ### New Features

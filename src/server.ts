@@ -4,7 +4,7 @@
 
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import { EntityService, getAllSchemas, getDialect, registerSchemas, getSchemaByCollection } from '@mostajs/orm';
+import { EntityService, getAllSchemas, getDialect, getSchema, registerSchemas, getSchemaByCollection } from '@mostajs/orm';
 import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
 import { ProjectManager } from '@mostajs/mproject';
 import type { ProjectConfig } from '@mostajs/mproject';
@@ -111,6 +111,84 @@ export async function startServer(): Promise<NetServer> {
   // 4b. Re-init dialect with loaded schemas (so relations/junction tables work)
   if (dialect && schemas.length > 0) {
     await dialect.initSchema(schemas);
+  }
+
+  // 4b-bis. Bootstrap RBAC + tenancy (User, Role, Permission, Account, ApiKey)
+  // Idempotent — safe to call on every boot. Emits the public demo apikey
+  // in clear ONCE (only when first run). Failure is non-fatal.
+  if (dialect) {
+    try {
+      const { bootstrapRbac } = await import('./auth/octonet-rbac-bootstrap.js');
+      const { getEnvBool } = await import('@mostajs/config');
+      const r = await bootstrapRbac(dialect, {
+        verbose: getEnvBool('OCTONET_BOOTSTRAP_VERBOSE', false),
+      });
+      if (r.ok) {
+        console.log(`  ✓ RBAC ready — admin=${r.adminEmail} trial=${r.trialAccountId} public=${r.publicAccountId}`);
+      } else {
+        console.warn(`  ⚠ RBAC bootstrap skipped: ${r.error}`);
+      }
+    } catch (e: any) {
+      console.warn(`  ⚠ RBAC bootstrap module unavailable: ${e?.message || e}`);
+    }
+  }
+
+  // 4b-ter. Register canonical scopes (projects/operations/transports) for the
+  // apikey scope registry. Scopes live in the host project's DB, not in code.
+  if (dialect) {
+    try {
+      const { registerScope, ScopeSchema, ScopeValueSchema } = await import('@mostajs/api-keys/server');
+      // Ensure Scope tables exist
+      registerSchemas([ScopeSchema as any, ScopeValueSchema as any]);
+      if (typeof (dialect as any).initSchema === 'function') {
+        await (dialect as any).initSchema([ScopeSchema, ScopeValueSchema]);
+      }
+      // operations — static, low-cardinality
+      await registerScope(dialect, {
+        name: 'operations', label: 'CRUD operations',
+        description: 'Coarse CRUD families enforced on entity routes',
+        cardinality: 'low', valuesSource: 'static',
+        moduleSource: '@mostajs/orm',
+        staticValues: [
+          { value: 'read',  label: 'Read',  sortOrder: 1 },
+          { value: 'write', label: 'Write', sortOrder: 2 },
+          { value: 'admin', label: 'Admin', sortOrder: 3 },
+        ],
+      });
+      // transports — static, low-cardinality
+      await registerScope(dialect, {
+        name: 'transports', label: 'Network transports',
+        description: 'Wire protocols served by Octonet',
+        cardinality: 'low', valuesSource: 'static',
+        moduleSource: '@mostajs/net',
+        staticValues: [
+          { value: 'rest',     sortOrder: 1 },
+          { value: 'graphql',  sortOrder: 2 },
+          { value: 'mcp',      sortOrder: 3 },
+          { value: 'ws',       sortOrder: 4 },
+          { value: 'sse',      sortOrder: 5 },
+          { value: 'trpc',     sortOrder: 6 },
+          { value: 'odata',    sortOrder: 7 },
+          { value: 'jsonrpc',  sortOrder: 8 },
+          { value: 'grpc',     sortOrder: 9 },
+          { value: 'nats',     sortOrder: 10 },
+          { value: 'arrow',    sortOrder: 11 },
+        ],
+      });
+      // projects — dynamic, high-cardinality, sourced from the Project entity
+      // (note: in fallback projects-tree.json mode this list will resolve empty
+      //  and the host should fall back to a custom resolver if needed).
+      await registerScope(dialect, {
+        name: 'projects', label: 'Projects',
+        description: 'Project slugs the key can access',
+        cardinality: 'high', valuesSource: 'dynamic',
+        dynamicSourceRef: 'Project.slug',
+        moduleSource: '@mostajs/mproject',
+      });
+      console.log('  ✓ Apikey scopes registered (projects, operations, transports)');
+    } catch (e: any) {
+      console.warn(`  ⚠ Apikey scope registration skipped: ${e?.message || e}`);
+    }
   }
 
   // 4c. Update default project with loaded schemas
@@ -284,8 +362,11 @@ ${C.cyan}└──────────────────────�
   // 6. ORM handler — context-aware via ProjectManager + CQRS read routing
   const readOps = new Set(['findAll', 'findOne', 'findById', 'findByIdWithRelations', 'findWithRelations', 'count', 'search', 'aggregate', 'distinct']);
   const ormHandler = async (req: OrmRequest, ctx: TransportContext): Promise<OrmResponse> => {
-    // Cloud middleware: validate API key, quota, permissions
-    if (cloudProcessRequest && ctx.projectName && ctx.projectName !== 'default') {
+    // Cloud middleware: validate API key, quota, permissions.
+    // Skip for projects already known locally by PM (sandbox-*, dev projects)
+    // — cloud only governs portal-registered projects.
+    const isLocalProject = ctx.projectName && pm.hasProject(ctx.projectName);
+    if (cloudProcessRequest && ctx.projectName && ctx.projectName !== 'default' && !isLocalProject) {
       const opType = readOps.has(req.op) ? 'GET' : 'POST';
       const result = await cloudProcessRequest(
         ctx.apiKey, ctx.projectName, ctx.transport, opType, undefined, ctx.meta?.ip as string
@@ -314,6 +395,29 @@ ${C.cyan}└──────────────────────�
     return es.execute(req);
   };
 
+  // 6-bis. Wrap ormHandler with global middleware chain (sanitizer + apikey
+  // authz). Used by routes that bypass the per-transport middleware system
+  // — i.e. registerProjectRoutes (/:project/*) and registerDynamicRestRoutes
+  // (/api/v1/...). Per-transport middleware (transport.use()) still applies
+  // for transports that have their own request pipeline (MCP, WS, etc.).
+  let protectedOrmHandler = ormHandler;
+  if (dialect) {
+    try {
+      const { composeMiddleware } = await import('./core/middleware.js');
+      const { createSanitizerMiddleware } = await import('./auth/sanitizer-middleware.js');
+      const { createApiKeyMiddleware } = await import('./auth/apikey-middleware.js');
+      const { getEnvBool } = await import('@mostajs/config');
+      const globalMiddlewares = [
+        createSanitizerMiddleware(),
+        createApiKeyMiddleware(() => dialect, { openMode: getEnvBool('OCTONET_OPEN_MODE', false) }),
+      ];
+      protectedOrmHandler = composeMiddleware(globalMiddlewares, ormHandler);
+      console.log(`  ✓ Protected ormHandler ready (sanitizer + apikey global wrapper)`);
+    } catch (e: any) {
+      console.warn(`  ⚠ Protected ormHandler wrapper failed: ${e?.message || e}`);
+    }
+  }
+
   // 7. Load and start enabled transports
   const enabledNames = getEnabledTransports(config);
 
@@ -337,6 +441,28 @@ ${C.cyan}└──────────────────────�
     // Add logging middleware
     transport.use(loggingMiddleware);
 
+    // Sanitizer — strip password / hash / tokens / secrets from responses.
+    try {
+      const { createSanitizerMiddleware } = await import('./auth/sanitizer-middleware.js');
+      transport.use(createSanitizerMiddleware());
+      console.log(`  ✓ Sanitizer middleware on ${transport.name}`);
+    } catch (e: any) {
+      console.warn(`  ⚠ Sanitizer middleware failed on ${transport.name}: ${e?.message || e}`);
+    }
+
+    // API key middleware — DB-backed (resolveApiKey + checkApiKey + scope checks).
+    try {
+      const { createApiKeyMiddleware } = await import('./auth/apikey-middleware.js');
+      const { getEnvBool } = await import('@mostajs/config');
+      transport.use(createApiKeyMiddleware(
+        () => dialect,
+        { openMode: getEnvBool('OCTONET_OPEN_MODE', false) },
+      ));
+      console.log(`  ✓ ApiKey middleware on ${transport.name}`);
+    } catch (e: any) {
+      console.warn(`  ⚠ ApiKey middleware failed on ${transport.name}: ${e?.message || e}`);
+    }
+
     // Wire ORM handler
     if (transport instanceof RestTransport) {
       transport.setHandler(ormHandler);
@@ -354,7 +480,7 @@ ${C.cyan}└──────────────────────�
     // Routes are GENERIC (/:collection) — resolves entity at runtime
     // This allows hot-reload when schemas are uploaded via /api/upload-schemas-json
     if (transport instanceof RestTransport) {
-      registerDynamicRestRoutes(app, ormHandler, pm);
+      registerDynamicRestRoutes(app, protectedOrmHandler, pm);
     }
 
     // Mount SSE route and wire EntityService events → broadcast
@@ -362,9 +488,11 @@ ${C.cyan}└──────────────────────�
       const sseTransport = transport;
       const ssePath = sseTransport.getPath();
 
-      // SSE endpoint: GET /events
+      // SSE endpoint: GET /events — auth-guarded
       app.get(ssePath, async (req, reply) => {
-        // Use raw Node.js response for SSE streaming
+        const { authGuard } = await import('./auth/route-guard.js');
+        const auth = await authGuard(dialect, req, { transport: 'sse', operation: 'read' });
+        if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         reply.hijack();
         sseTransport.addClient(reply.raw);
       });
@@ -385,11 +513,24 @@ ${C.cyan}└──────────────────────�
       const schema = gqlTransport.generateSchema();
       const resolvers = gqlTransport.generateResolvers();
       const mercurius = (await import('mercurius')).default;
+      const { authGuard } = await import('./auth/route-guard.js');
       await app.register(mercurius, {
         schema,
         resolvers,
         path: gqlTransport.getInfo().url || '/graphql',
-        graphiql: true,  // Enable GraphiQL IDE at the same path
+        graphiql: true,
+        // Auth check on every GraphQL request via the context hook.
+        // Throwing inside context aborts the request before resolvers run.
+        context: async (req: any, reply: any) => {
+          const auth = await authGuard(dialect, req, { transport: 'graphql' });
+          if (!auth.ok) {
+            reply.code(auth.status!);
+            const err = new Error(auth.body?.error?.message || 'unauthorized');
+            (err as any).statusCode = auth.status;
+            throw err;
+          }
+          return { authCtx: auth.ctx };
+        },
       });
     }
 
@@ -400,6 +541,9 @@ ${C.cyan}└──────────────────────�
       const rpcPath = rpcTransport.getPath();
 
       app.post(rpcPath, async (req, reply) => {
+        const { authGuard } = await import('./auth/route-guard.js');
+        const auth = await authGuard(dialect, req, { transport: 'jsonrpc' });
+        if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const result = await rpcTransport.handleBody(req.body);
         return result;
       });
@@ -421,8 +565,18 @@ ${C.cyan}└──────────────────────�
       mcpTransportRef = mcpTransport; // Store ref for MCP Agent Simulator
       const mcpPath = mcpTransport.getPath();
 
-      // MCP uses raw Node.js request/response for streaming
+      // MCP uses raw Node.js request/response for streaming.
+      // Auth check happens BEFORE hijack so we can still set HTTP status on failure.
+      // fallbackPublicLabel='public-default' preserves compat with mcp.so / Claude
+      // Desktop users who haven't yet published the apikey in their config — the
+      // public-default key's read-only scope still applies, so writes stay blocked.
       app.all(mcpPath, async (req, reply) => {
+        const { authGuard } = await import('./auth/route-guard.js');
+        const auth = await authGuard(dialect, req, {
+          transport: 'mcp',
+          fallbackPublicLabel: 'public-default',
+        });
+        if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         reply.hijack();
         await mcpTransport.handleRequest(req.raw, reply.raw, req.body);
       });
@@ -436,6 +590,10 @@ ${C.cyan}└──────────────────────�
 
       // tRPC uses POST for mutations and GET for queries — both route to handleRequest
       app.all(`${trpcPath}/*`, async (req, reply) => {
+        const { authGuard } = await import('./auth/route-guard.js');
+        const op = req.method === 'GET' ? 'read' : 'write';
+        const auth = await authGuard(dialect, req, { transport: 'trpc', operation: op as any });
+        if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const result = await trpcTransport.handleRequest(req.url, req.body as any);
         return result;
       });
@@ -459,8 +617,12 @@ ${C.cyan}└──────────────────────�
         return odataTransport.generateMetadata();
       });
 
-      // OData CRUD — all methods
+      // OData CRUD — all methods, auth-guarded
       app.all(`${odataPath}/*`, async (req, reply) => {
+        const { authGuard } = await import('./auth/route-guard.js');
+        const op = req.method === 'GET' ? 'read' : 'write';
+        const auth = await authGuard(dialect, req, { transport: 'odata', operation: op as any });
+        if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const q = req.query as Record<string, string>;
         const result = await odataTransport.handleRequest(req.method, req.url, q, req.body);
         reply.status(result.status);
@@ -1381,7 +1543,21 @@ ${C.cyan}└──────────────────────�
   });
 
   // 8g. Project namespace routing — /:project/* (externalized in src/routes/project.ts)
-  registerProjectRoutes(app, pm, ormHandler);
+  registerProjectRoutes(app, pm, protectedOrmHandler);
+
+  // 8g-bis. T1 — sandbox publique /try (POST=create, GET=HTML form, cleanup TTL 7j)
+  if (dialect) {
+    try {
+      const { registerTryRoutes, startTrialCleanupJob } = await import('./routes/try.js');
+      const { registerTryPage } = await import('./routes/try-page.js');
+      registerTryPage(app);
+      registerTryRoutes(app, { dialect, pm: pm as any });
+      startTrialCleanupJob({ dialect, pm: pm as any });
+      console.log(`  ✓ T1 sandbox endpoint /try ready (rate-limited 10/h/IP, TTL 7d)`);
+    } catch (e: any) {
+      console.warn(`  ⚠ /try endpoint unavailable: ${e?.message || e}`);
+    }
+  }
 
   // 8h. Replicator routes (optional — only if @mostajs/replicator installed)
   if (rm) {
@@ -1480,20 +1656,27 @@ function registerDynamicRestRoutes(
   };
 
   const handle = async (ormReq: OrmRequest, reply: any, projectName?: string, req?: any) => {
-    // Resolve projectName from header if not provided via path
-    const resolvedProjectId = projectName || req?.headers?.['x-project'] || undefined;
-    const ctx: TransportContext = { transport: 'rest', projectName: resolvedProjectId };
+    // Build TransportContext from HTTP request (apiKey, projectName, ip)
+    const { extractAuthContext } = await import('./core/auth-context.js');
+    const ctx = extractAuthContext({
+      transport: 'rest',
+      headers:   req?.headers ?? {},
+      query:     req?.query ?? {},
+      ip:        req?.ip,
+    });
+    // Override projectName when explicitly resolved from path
+    if (projectName) ctx.projectName = projectName;
     const res = await ormHandler(ormReq, ctx);
     if (res.status === 'error') {
-      reply.status(res.error?.code === 'ENTITY_NOT_FOUND' || res.error?.code === 'EntityNotFoundError' ? 404 :
-                   res.error?.code?.startsWith('MISSING') ? 400 :
-                   res.error?.code === 'UNKNOWN_ENTITY' ? 404 :
-                   res.error?.code === 'DB_NOT_CONNECTED' ? 503 : 500);
+      const { errorCodeToHttpStatus } = await import('./core/error-mapping.js');
+      reply.status(errorCodeToHttpStatus(res.error?.code));
     }
     return res;
   };
 
-  /** Resolve collection name → entity name. Checks project schemas first, then global registry */
+  /** Resolve collection name → entity name. Checks project schemas first, then global registry.
+   *  The identifier may be either a collection name (e.g. "users") OR an entity name
+   *  (e.g. "User") — both forms are accepted to mirror the behaviour on explicit projects. */
   const resolveEntity = (collection: string, projectName?: string): string | null => {
     // If projectName specified, check that project's schemas first
     if (projectName) {
@@ -1503,13 +1686,19 @@ function registerDynamicRestRoutes(
         if (schema) return schema.name;
       }
     }
-    // Fallback to global ORM registry
+    // Fallback to global ORM registry — try BOTH collection and name lookups.
+    // Without the name lookup, clients calling `/api/v1/User` (PascalCase entity
+    // name, which matches the JS/Java/C# idiomatic usage) got a 404 when the
+    // schema's `collection` was the plural form "users" (very common).
     try {
-      const schema = getSchemaByCollection(collection);
-      return schema?.name || null;
-    } catch {
-      return null;
-    }
+      const byCollection = getSchemaByCollection(collection);
+      if (byCollection) return byCollection.name;
+    } catch { /* ignore */ }
+    try {
+      const byName = getSchema(collection);
+      if (byName) return byName.name;
+    } catch { /* entity not registered — fall through */ }
+    return null;
   };
 
   /**
@@ -1553,7 +1742,7 @@ function registerDynamicRestRoutes(
     // If col was a project → create on that project's collection
     if (r.projectName && !r.id) {
       const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
-      const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, r.projectName);
+      const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, r.projectName, req);
       if (reply.statusCode < 400) reply.status(201);
       return res;
     }
@@ -1568,7 +1757,7 @@ function registerDynamicRestRoutes(
     const { col } = req.params as { col: string };
     const entity = resolveEntity(col, (req.headers as any)['x-project']); if (!entity) return notFound(col, reply);
     const q = req.query as Record<string, string>;
-    return handle({ op: 'count', entity, filter: q.filter ? JSON.parse(q.filter) : {} }, reply);
+    return handle({ op: 'count', entity, filter: q.filter ? JSON.parse(q.filter) : {} }, reply, undefined, req);
   });
 
   app.get(`${prefix}/:col/one`, async (req, reply) => {
@@ -1576,35 +1765,35 @@ function registerDynamicRestRoutes(
     const entity = resolveEntity(col, (req.headers as any)['x-project']); if (!entity) return notFound(col, reply);
     const q = req.query as Record<string, string>;
     const { options, relations } = parseOpts(q);
-    return handle({ op: 'findOne', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply);
+    return handle({ op: 'findOne', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, undefined, req);
   });
 
   app.post(`${prefix}/:col/search`, async (req, reply) => {
     const { col } = req.params as { col: string };
     const entity = resolveEntity(col, (req.headers as any)['x-project']); if (!entity) return notFound(col, reply);
     const body = req.body as Record<string, unknown>;
-    return handle({ op: 'search', entity, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply);
+    return handle({ op: 'search', entity, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply, undefined, req);
   });
 
   app.post(`${prefix}/:col/upsert`, async (req, reply) => {
     const { col } = req.params as { col: string };
     const entity = resolveEntity(col, (req.headers as any)['x-project']); if (!entity) return notFound(col, reply);
     const { filter, data } = req.body as { filter: any; data: any };
-    return handle({ op: 'upsert', entity, filter, data }, reply);
+    return handle({ op: 'upsert', entity, filter, data }, reply, undefined, req);
   });
 
   app.post(`${prefix}/:col/aggregate`, async (req, reply) => {
     const { col } = req.params as { col: string };
     const entity = resolveEntity(col, (req.headers as any)['x-project']); if (!entity) return notFound(col, reply);
     const { stages } = req.body as { stages: any[] };
-    return handle({ op: 'aggregate', entity, stages }, reply);
+    return handle({ op: 'aggregate', entity, stages }, reply, undefined, req);
   });
 
   app.put(`${prefix}/:col/bulk`, async (req, reply) => {
     const { col } = req.params as { col: string };
     const entity = resolveEntity(col, (req.headers as any)['x-project']); if (!entity) return notFound(col, reply);
     const { filter, data } = req.body as { filter: any; data: any };
-    return handle({ op: 'updateMany', entity, filter, data }, reply);
+    return handle({ op: 'updateMany', entity, filter, data }, reply, undefined, req);
   });
 
   app.delete(`${prefix}/:col/bulk`, async (req, reply) => {
@@ -1613,7 +1802,7 @@ function registerDynamicRestRoutes(
     const body = req.body as Record<string, unknown> | null;
     const q = req.query as Record<string, string>;
     const filter = body?.filter || (q.filter ? JSON.parse(q.filter) : {});
-    return handle({ op: 'deleteMany', entity, filter }, reply);
+    return handle({ op: 'deleteMany', entity, filter }, reply, undefined, req);
   });
 
   // ── Parametric /:col/:id routes ──
@@ -1626,26 +1815,26 @@ function registerDynamicRestRoutes(
       const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
       const q = req.query as Record<string, string>;
       const { options, relations } = parseOpts(q);
-      return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, r.projectName);
+      return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, r.projectName, req);
     }
     const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
     const q = req.query as Record<string, string>;
     const { options, relations } = parseOpts(q);
-    return handle({ op: 'findById', entity, id: r.id!, options, relations }, reply, r.projectName);
+    return handle({ op: 'findById', entity, id: r.id!, options, relations }, reply, r.projectName, req);
   });
 
   app.put(`${prefix}/:col/:id`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
-    return handle({ op: 'update', entity, id: r.id!, data: req.body as Record<string, unknown> }, reply, r.projectName);
+    return handle({ op: 'update', entity, id: r.id!, data: req.body as Record<string, unknown> }, reply, r.projectName, req);
   });
 
   app.delete(`${prefix}/:col/:id`, async (req, reply) => {
     const { col, id } = req.params as { col: string; id: string };
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
-    return handle({ op: 'delete', entity, id: r.id!, }, reply, r.projectName);
+    return handle({ op: 'delete', entity, id: r.id!, }, reply, r.projectName, req);
   });
 
   app.post(`${prefix}/:col/:id/addToSet`, async (req, reply) => {
@@ -1653,7 +1842,7 @@ function registerDynamicRestRoutes(
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
     const { field, value } = req.body as { field: string; value: unknown };
-    return handle({ op: 'addToSet', entity, id: r.id!, field, value }, reply, r.projectName);
+    return handle({ op: 'addToSet', entity, id: r.id!, field, value }, reply, r.projectName, req);
   });
 
   app.post(`${prefix}/:col/:id/pull`, async (req, reply) => {
@@ -1661,7 +1850,7 @@ function registerDynamicRestRoutes(
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
     const { field, value } = req.body as { field: string; value: unknown };
-    return handle({ op: 'pull', entity, id: r.id!, field, value }, reply, r.projectName);
+    return handle({ op: 'pull', entity, id: r.id!, field, value }, reply, r.projectName, req);
   });
 
   app.post(`${prefix}/:col/:id/increment`, async (req, reply) => {
@@ -1669,7 +1858,7 @@ function registerDynamicRestRoutes(
     const r = resolveParams(col, id, req.headers as Record<string, string>);
     const entity = resolveEntity(r.col, r.projectName); if (!entity) return notFound(r.col, reply);
     const { field, amount } = req.body as { field: string; amount: number };
-    return handle({ op: 'increment', entity, id: r.id!, field, amount }, reply, r.projectName);
+    return handle({ op: 'increment', entity, id: r.id!, field, amount }, reply, r.projectName, req);
   });
 
   // ── Collection-level routes (also handles /api/v1/:project/:col via /:col/:id) ──
@@ -1686,14 +1875,14 @@ function registerDynamicRestRoutes(
     const entity = resolveEntity(rawCol, (req.headers as any)['x-project']); if (!entity) return notFound(rawCol, reply);
     const q = req.query as Record<string, string>;
     const { options, relations } = parseOpts(q);
-    return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, projectName);
+    return handle({ op: 'findAll', entity, filter: q.filter ? JSON.parse(q.filter) : {}, options, relations }, reply, projectName, req);
   });
 
   app.post(`${prefix}/:col`, async (req, reply) => {
     const { col: rawCol } = req.params as { col: string };
     const projectName = (req.headers as Record<string, string>)['x-project'] || undefined;
     const entity = resolveEntity(rawCol, (req.headers as any)['x-project']); if (!entity) return notFound(rawCol, reply);
-    const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, projectName);
+    const res = await handle({ op: 'create', entity, data: req.body as Record<string, unknown> }, reply, projectName, req);
     if (reply.statusCode < 400) reply.status(201);
     return res;
   });
@@ -1712,12 +1901,19 @@ function registerRestRoutes(
   const prefix = '/api/v1';
   const col = schema.collection;
 
-  const handle = async (ormReq: OrmRequest, reply: any) => {
-    const ctx: TransportContext = { transport: 'rest' };
+  const handle = async (ormReq: OrmRequest, reply: any, _projectName?: string, req?: any) => {
+    const { extractAuthContext } = await import('./core/auth-context.js');
+    const ctx = extractAuthContext({
+      transport: 'rest',
+      headers:   req?.headers ?? {},
+      query:     req?.query ?? {},
+      ip:        req?.ip,
+    });
+    if (_projectName) ctx.projectName = _projectName;
     const res = await ormHandler(ormReq, ctx);
     if (res.status === 'error') {
-      reply.status(res.error?.code === 'ENTITY_NOT_FOUND' || res.error?.code === 'EntityNotFoundError' ? 404 :
-                   res.error?.code?.startsWith('MISSING') ? 400 : 500);
+      const { errorCodeToHttpStatus } = await import('./core/error-mapping.js');
+      reply.status(errorCodeToHttpStatus(res.error?.code));
     }
     return res;
   };
@@ -1748,29 +1944,29 @@ function registerRestRoutes(
 
   app.post(`${prefix}/${col}/search`, async (req, reply) => {
     const body = req.body as Record<string, unknown>;
-    return handle({ op: 'search', entity: schema.name, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply);
+    return handle({ op: 'search', entity: schema.name, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply, undefined, req);
   });
 
   app.post(`${prefix}/${col}/upsert`, async (req, reply) => {
     const { filter, data } = req.body as { filter: any; data: any };
-    return handle({ op: 'upsert', entity: schema.name, filter, data }, reply);
+    return handle({ op: 'upsert', entity: schema.name, filter, data }, reply, undefined, req);
   });
 
   app.post(`${prefix}/${col}/aggregate`, async (req, reply) => {
     const { stages } = req.body as { stages: any[] };
-    return handle({ op: 'aggregate', entity: schema.name, stages }, reply);
+    return handle({ op: 'aggregate', entity: schema.name, stages }, reply, undefined, req);
   });
 
   app.put(`${prefix}/${col}/bulk`, async (req, reply) => {
     const { filter, data } = req.body as { filter: any; data: any };
-    return handle({ op: 'updateMany', entity: schema.name, filter, data }, reply);
+    return handle({ op: 'updateMany', entity: schema.name, filter, data }, reply, undefined, req);
   });
 
   app.delete(`${prefix}/${col}/bulk`, async (req, reply) => {
     const body = req.body as Record<string, unknown> | null;
     const q = req.query as Record<string, string>;
     const filter = body?.filter || (q.filter ? JSON.parse(q.filter) : {});
-    return handle({ op: 'deleteMany', entity: schema.name, filter }, reply);
+    return handle({ op: 'deleteMany', entity: schema.name, filter }, reply, undefined, req);
   });
 
   // ── Parametric /:id routes ──
@@ -1779,35 +1975,35 @@ function registerRestRoutes(
     const { id } = req.params as { id: string };
     const q = req.query as Record<string, string>;
     const { options, relations } = parseOpts(q);
-    return handle({ op: 'findById', entity: schema.name, id, options, relations }, reply);
+    return handle({ op: 'findById', entity: schema.name, id, options, relations }, reply, undefined, req);
   });
 
   app.put(`${prefix}/${col}/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    return handle({ op: 'update', entity: schema.name, id, data: req.body as Record<string, unknown> }, reply);
+    return handle({ op: 'update', entity: schema.name, id, data: req.body as Record<string, unknown> }, reply, undefined, req);
   });
 
   app.delete(`${prefix}/${col}/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    return handle({ op: 'delete', entity: schema.name, id }, reply);
+    return handle({ op: 'delete', entity: schema.name, id }, reply, undefined, req);
   });
 
   app.post(`${prefix}/${col}/:id/addToSet`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { field, value } = req.body as { field: string; value: unknown };
-    return handle({ op: 'addToSet', entity: schema.name, id, field, value }, reply);
+    return handle({ op: 'addToSet', entity: schema.name, id, field, value }, reply, undefined, req);
   });
 
   app.post(`${prefix}/${col}/:id/pull`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { field, value } = req.body as { field: string; value: unknown };
-    return handle({ op: 'pull', entity: schema.name, id, field, value }, reply);
+    return handle({ op: 'pull', entity: schema.name, id, field, value }, reply, undefined, req);
   });
 
   app.post(`${prefix}/${col}/:id/increment`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { field, amount } = req.body as { field: string; amount: number };
-    return handle({ op: 'increment', entity: schema.name, id, field, amount }, reply);
+    return handle({ op: 'increment', entity: schema.name, id, field, amount }, reply, undefined, req);
   });
 
   // ── Collection-level routes ──
@@ -1819,7 +2015,7 @@ function registerRestRoutes(
   });
 
   app.post(`${prefix}/${col}`, async (req, reply) => {
-    const res = await handle({ op: 'create', entity: schema.name, data: req.body as Record<string, unknown> }, reply);
+    const res = await handle({ op: 'create', entity: schema.name, data: req.body as Record<string, unknown> }, reply, undefined, req);
     if (reply.statusCode < 400) reply.status(201);
     return res;
   });

@@ -1,70 +1,109 @@
-// @mostajs/net — API Key authentication middleware
-// Validates Bearer token against .mosta/apikeys.json
-// Checks permissions against the 3D matrix (API key × SGBD × transport)
-// Author: Dr Hamid MADANI drmdh@msn.com
+// @mostajs/net — API Key authentication middleware (adapter)
+//
+// Adapter trivial entre la signature TransportMiddleware d'Octonet et
+// le helper agnostique checkApiKey() de @mostajs/api-keys.
+//
+// Toute la logique de vérification (résolution, scope-checks, touch)
+// vit dans @mostajs/api-keys. Ce fichier ne fait que :
+//   1. extraire la clé du contexte
+//   2. construire les checks selon le contexte de la requête
+//   3. appeler checkApiKey(dialect, { rawKey, checks, ip })
+//   4. mapper le résultat sur la signature middleware
+//
+// Author: Dr Hamid MADANI <drmdh@msn.com>
 
 import type { TransportMiddleware } from '../core/types.js';
-import { validateApiKey, checkPermission, opToPermission } from './apikeys.js';
-import { getCurrentDialectType } from '@mostajs/orm';
+import type { IDialect } from '@mostajs/orm';
 
 /**
- * API key authentication middleware.
- *
- * Extracts the API key from:
- *   - Header: Authorization: Bearer msk_live_...
- *   - Query: ?apikey=msk_live_...
- *
- * If .mosta/apikeys.json has no subscriptions, all requests are allowed (open mode).
- * If subscriptions exist, a valid API key is required.
+ * Map an OrmRequest.op to the coarse 'read' | 'write' | 'admin' family
+ * used by the conventional 'operations' scope. Pure mapping — no
+ * authorization decision here.
  */
-export const apiKeyMiddleware: TransportMiddleware = async (req, ctx, next) => {
-  const key = ctx.apiKey;
+function opToOperation(op: string): 'read' | 'write' | 'admin' {
+  if (op === 'findAll' || op === 'findOne' || op === 'findById'
+      || op === 'count' || op === 'search' || op === 'aggregate' || op === 'stream') {
+    return 'read';
+  }
+  if (op === 'create' || op === 'update' || op === 'delete' || op === 'upsert'
+      || op === 'updateMany' || op === 'addToSet' || op === 'pull' || op === 'increment') {
+    return 'write';
+  }
+  return 'admin';
+}
 
-  // If no key provided, check if we're in open mode (no subscriptions configured)
-  if (!key) {
-    const { readApiKeys } = await import('./apikeys.js');
-    const data = readApiKeys();
-    if (data.subscriptions.length === 0) {
-      // Open mode: no API keys configured, allow everything
-      return next();
+/**
+ * Build an API key middleware bound to a metadata dialect.
+ *
+ * @param getMetaDialect Returns the dialect that hosts api_keys + scopes
+ *                       tables. May return null in dev mode (no DB).
+ * @param options.openMode If true, requests without a key pass through.
+ */
+export function createApiKeyMiddleware(
+  getMetaDialect: () => IDialect | null | undefined,
+  options: { openMode?: boolean } = {},
+): TransportMiddleware {
+  const { openMode = false } = options;
+
+  return async (req, ctx, next) => {
+    const rawKey = ctx.apiKey;
+
+    // No API key in request
+    if (!rawKey) {
+      if (openMode) return next();
+      return {
+        status: 'error',
+        error: { code: 'UNAUTHORIZED',
+          message: 'API key required. Pass it via X-API-Key header (or ?apikey=...)' },
+      };
     }
-    return {
-      status: 'error',
-      error: {
-        code: 'UNAUTHORIZED',
-        message: 'API key required. Pass it via Authorization: Bearer <key> header',
-      },
-    };
-  }
 
-  // Validate key
-  const sub = validateApiKey(key);
-  if (!sub) {
-    return {
-      status: 'error',
-      error: {
-        code: 'UNAUTHORIZED',
-        message: 'Invalid or revoked API key',
-      },
-    };
-  }
+    const dialect = getMetaDialect();
+    if (!dialect) {
+      // No DB → can't verify. Strict by default.
+      if (openMode) return next();
+      return {
+        status: 'error',
+        error: { code: 'UNAUTHORIZED',
+          message: 'API key validation unavailable (no metadata DB connected)' },
+      };
+    }
 
-  // Check permission: dialect × transport × operation
-  const dialect = getCurrentDialectType();
-  const perm = opToPermission(req.op);
-  if (!checkPermission(sub, dialect, ctx.transport, perm)) {
-    return {
-      status: 'error',
-      error: {
-        code: 'FORBIDDEN',
-        message: `Subscription "${sub.name}" does not have ${perm} permission for ${dialect}/${ctx.transport}`,
-      },
-    };
-  }
+    try {
+      const { checkApiKey } = await import('@mostajs/api-keys/server');
 
-  // Enrich context
-  ctx.subscription = sub.name;
-  ctx.permissions = sub.permissions[dialect] || sub.permissions['*'] || {};
+      const result = await checkApiKey(dialect, {
+        rawKey,
+        checks: [
+          { scope: 'projects',   value: ctx.projectName || 'default' },
+          { scope: 'operations', value: opToOperation(req.op as string) },
+          { scope: 'transports', value: ctx.transport || 'rest' },
+        ],
+        ip: (ctx.meta?.ip as string) || undefined,
+      });
 
-  return next();
-};
+      if (!result.ok) {
+        return {
+          status: 'error',
+          error: { code: result.code || 'UNAUTHORIZED',
+            message: result.message || 'API key check failed' },
+        };
+      }
+
+      // Enrich downstream context
+      const apikey = result.apikey as any;
+      ctx.subscription       = apikey.label || apikey.id;
+      ctx.permissions        = apikey.permissions?.scopes ?? {};
+      (ctx as any).accountId = apikey.account || apikey.accountId;
+      (ctx as any).apikeyId  = apikey.id;
+
+      return next();
+    } catch (e: any) {
+      console.warn('[apikey-middleware] check failed:', e?.message || e);
+      return {
+        status: 'error',
+        error: { code: 'UNAUTHORIZED', message: 'API key check error' },
+      };
+    }
+  };
+}

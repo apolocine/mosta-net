@@ -94,38 +94,38 @@ export class RestTransport implements ITransport {
     // GET /count → count
     this.app.get(`${prefix}/${col}/count`, async (req: FastifyRequest, reply: FastifyReply) => {
       const query = req.query as Record<string, string>;
-      return this.handle({ op: 'count', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {} }, reply);
+      return this.handle(req, { op: 'count', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {} }, reply);
     });
 
     // GET /one → findOne
     this.app.get(`${prefix}/${col}/one`, async (req: FastifyRequest, reply: FastifyReply) => {
       const query = req.query as Record<string, string>;
       const { options, relations } = this.parseQueryOptions(query);
-      return this.handle({ op: 'findOne', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {}, options, relations }, reply);
+      return this.handle(req, { op: 'findOne', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {}, options, relations }, reply);
     });
 
     // POST /search → search
     this.app.post(`${prefix}/${col}/search`, async (req: FastifyRequest, reply: FastifyReply) => {
       const body = req.body as Record<string, unknown>;
-      return this.handle({ op: 'search', entity: schema.name, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply);
+      return this.handle(req, { op: 'search', entity: schema.name, query: body.query as string, searchFields: body.fields as string[], options: body.options as any }, reply);
     });
 
     // POST /upsert → upsert
     this.app.post(`${prefix}/${col}/upsert`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { filter, data } = req.body as { filter: any; data: any };
-      return this.handle({ op: 'upsert', entity: schema.name, filter, data }, reply);
+      return this.handle(req, { op: 'upsert', entity: schema.name, filter, data }, reply);
     });
 
     // POST /aggregate → aggregate
     this.app.post(`${prefix}/${col}/aggregate`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { stages } = req.body as { stages: any[] };
-      return this.handle({ op: 'aggregate', entity: schema.name, stages }, reply);
+      return this.handle(req, { op: 'aggregate', entity: schema.name, stages }, reply);
     });
 
     // PUT /bulk → updateMany
     this.app.put(`${prefix}/${col}/bulk`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { filter, data } = req.body as { filter: any; data: any };
-      return this.handle({ op: 'updateMany', entity: schema.name, filter, data }, reply);
+      return this.handle(req, { op: 'updateMany', entity: schema.name, filter, data }, reply);
     });
 
     // DELETE /bulk → deleteMany
@@ -133,7 +133,7 @@ export class RestTransport implements ITransport {
       const body = req.body as Record<string, unknown> | null;
       const query = req.query as Record<string, string>;
       const filter = body?.filter || (query.filter ? JSON.parse(query.filter) : {});
-      return this.handle({ op: 'deleteMany', entity: schema.name, filter }, reply);
+      return this.handle(req, { op: 'deleteMany', entity: schema.name, filter }, reply);
     });
 
     // ── Parametric /:id routes ──────────────────────────
@@ -143,40 +143,40 @@ export class RestTransport implements ITransport {
       const { id } = req.params as { id: string };
       const query = req.query as Record<string, string>;
       const { options, relations } = this.parseQueryOptions(query);
-      return this.handle({ op: 'findById', entity: schema.name, id, options, relations }, reply);
+      return this.handle(req, { op: 'findById', entity: schema.name, id, options, relations }, reply);
     });
 
     // PUT /:id → update
     this.app.put(`${prefix}/${col}/:id`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { id } = req.params as { id: string };
-      return this.handle({ op: 'update', entity: schema.name, id, data: req.body as Record<string, unknown> }, reply);
+      return this.handle(req, { op: 'update', entity: schema.name, id, data: req.body as Record<string, unknown> }, reply);
     });
 
     // DELETE /:id → delete
     this.app.delete(`${prefix}/${col}/:id`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { id } = req.params as { id: string };
-      return this.handle({ op: 'delete', entity: schema.name, id }, reply);
+      return this.handle(req, { op: 'delete', entity: schema.name, id }, reply);
     });
 
     // POST /:id/addToSet → addToSet
     this.app.post(`${prefix}/${col}/:id/addToSet`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { id } = req.params as { id: string };
       const { field, value } = req.body as { field: string; value: unknown };
-      return this.handle({ op: 'addToSet', entity: schema.name, id, field, value }, reply);
+      return this.handle(req, { op: 'addToSet', entity: schema.name, id, field, value }, reply);
     });
 
     // POST /:id/pull → pull
     this.app.post(`${prefix}/${col}/:id/pull`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { id } = req.params as { id: string };
       const { field, value } = req.body as { field: string; value: unknown };
-      return this.handle({ op: 'pull', entity: schema.name, id, field, value }, reply);
+      return this.handle(req, { op: 'pull', entity: schema.name, id, field, value }, reply);
     });
 
     // POST /:id/increment → increment
     this.app.post(`${prefix}/${col}/:id/increment`, async (req: FastifyRequest, reply: FastifyReply) => {
       const { id } = req.params as { id: string };
       const { field, amount } = req.body as { field: string; amount: number };
-      return this.handle({ op: 'increment', entity: schema.name, id, field, amount }, reply);
+      return this.handle(req, { op: 'increment', entity: schema.name, id, field, amount }, reply);
     });
 
     // ── Collection-level routes ─────────────────────────
@@ -185,12 +185,12 @@ export class RestTransport implements ITransport {
     this.app.get(`${prefix}/${col}`, async (req: FastifyRequest, reply: FastifyReply) => {
       const query = req.query as Record<string, string>;
       const { options, relations } = this.parseQueryOptions(query);
-      return this.handle({ op: 'findAll', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {}, options, relations }, reply);
+      return this.handle(req, { op: 'findAll', entity: schema.name, filter: query.filter ? JSON.parse(query.filter) : {}, options, relations }, reply);
     });
 
     // POST / → create
     this.app.post(`${prefix}/${col}`, async (req: FastifyRequest, reply: FastifyReply) => {
-      const res = await this.handle({ op: 'create', entity: schema.name, data: req.body as Record<string, unknown> }, reply);
+      const res = await this.handle(req, { op: 'create', entity: schema.name, data: req.body as Record<string, unknown> }, reply);
       if (reply.statusCode < 400) reply.status(201);
       return res;
     });
@@ -200,7 +200,7 @@ export class RestTransport implements ITransport {
   // Request handling (OrmRequest → middleware → OrmResponse → HTTP)
   // ============================================================
 
-  private async handle(ormReq: OrmRequest, reply: FastifyReply): Promise<unknown> {
+  private async handle(req: FastifyRequest, ormReq: OrmRequest, reply: FastifyReply): Promise<unknown> {
     this.stats.requests++;
 
     if (!this.ormHandler) {
@@ -209,7 +209,14 @@ export class RestTransport implements ITransport {
       return { status: 'error', error: { code: 'NO_HANDLER', message: 'ORM handler not initialized' } };
     }
 
-    const ctx: TransportContext = { transport: this.name };
+    // Populate context from the HTTP request via the shared helper
+    const { extractAuthContext } = await import('../core/auth-context.js');
+    const ctx: TransportContext = extractAuthContext({
+      transport: this.name,
+      headers:   req.headers as any,
+      query:     req.query as any,
+      ip:        (req as any).ip,
+    });
 
     // Compose middleware chain → final handler
     const chain = composeMiddleware(this.middlewares, this.ormHandler);
@@ -225,19 +232,12 @@ export class RestTransport implements ITransport {
   }
 
   private mapErrorToHttpStatus(code?: string): number {
-    switch (code) {
-      case 'ENTITY_NOT_FOUND': return 404;
-      case 'EntityNotFoundError': return 404;
-      case 'MISSING_ID': return 400;
-      case 'MISSING_DATA': return 400;
-      case 'MISSING_QUERY': return 400;
-      case 'MISSING_PARAMS': return 400;
-      case 'MISSING_STAGES': return 400;
-      case 'UNKNOWN_OP': return 400;
-      case 'ValidationError': return 422;
-      case 'ConnectionError': return 503;
-      default: return 500;
-    }
+    // Delegated to the shared helper — keeps mapping consistent across
+    // REST, project routes, and dynamic routes.
+    // Synchronous import (cached after first call) — safe in this context.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { errorCodeToHttpStatus } = require('../core/error-mapping.js');
+    return errorCodeToHttpStatus(code);
   }
 }
 

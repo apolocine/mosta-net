@@ -267,4 +267,32 @@ export class NetClient {
     });
     return json.data ?? json;
   }
+
+  /**
+   * Upload schemas to the server, persist them, create the backing tables,
+   * and let the server restart itself so the new routes are registered.
+   * This is the primary provisioning endpoint — `applySchema()` only
+   * re-applies schemas already in memory.
+   *
+   * After a successful call, the server exits (PM2 / systemd restarts it).
+   * Poll `/health` before issuing the next CRUD call.
+   *
+   * Added in v2.0.39 to mirror the Java port (com.mostajs:mostajs-net-client).
+   */
+  async uploadSchemasJson(
+    schemas: Record<string, unknown>[]
+  ): Promise<{
+    ok: boolean;
+    count?: number;
+    needsRestart?: boolean;
+    schemas?: string[];
+    error?: string;
+  }> {
+    const res = await fetch(`${this.baseUrl}/api/upload-schemas-json`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ schemas }),
+    });
+    return res.json() as Promise<any>;
+  }
 }
