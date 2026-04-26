@@ -6,14 +6,14 @@ import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { EntityService, getAllSchemas, getSchema, registerSchemas, getSchemaByCollection } from '@mostajs/orm';
 import type { EntitySchema, OrmRequest, OrmResponse, IDialect } from '@mostajs/orm';
-// Octonet's singleton dialect comes from octoswitcher (not @mostajs/orm
+// Octonet's singleton dialect comes from @mostajs/data-plug (not @mostajs/orm
 // directly) so an Octonet instance can EITHER hit a real DB (MOSTA_DATA=orm)
 // OR proxy to an upstream Octonet (MOSTA_DATA=net). This enables chaining :
 // octonet_edge (net) → octonet_regional (net) → octonet_central (orm).
 // Per-project dialects (default + N user projects) are still managed by
 // ProjectManager via openIsolatedDialect — they are explicit isolation, not
 // part of the chain.
-import { getDialect as switcherGetDialect } from '@mostajs/octoswitcher';
+import { getDialect as switcherGetDialect } from '@mostajs/data-plug';
 import { ProjectManager } from '@mostajs/mproject';
 import type { ProjectConfig } from '@mostajs/mproject';
 import { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip } from './lib/schema-loader.js';
@@ -69,7 +69,7 @@ export async function startServer(): Promise<NetServer> {
   //
   // IMPORTANT — ce singleton DOIT pointer sur la meta DB (User, Account,
   // ApiKey, scopes, plans). C'est ce que rbac/api-keys/auth/subscriptions-plan
-  // résolvent quand ils appellent `octoswitcher.getDialect()` (principe :
+  // résolvent quand ils appellent `data-plug.getDialect()` (principe :
   // aucun module ne hardcode son accès DB — tous suivent le switcher du hôte).
   //
   // Les DBs PER-PROJET (entités userland Client/Product/Order) sont gérées
@@ -943,7 +943,7 @@ ${C.cyan}└──────────────────────�
     try {
       // Force new connection — switcher gere la fermeture physique selon
       // le mode (orm/net), le caller ignore avec qui il parle.
-      const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+      const { disconnect: switcherDisconnect } = await import('@mostajs/data-plug');
       await switcherDisconnect();
       dialect = (await switcherGetDialect()) as unknown as IDialect;
       entityService = new EntityService(dialect);
@@ -968,7 +968,7 @@ ${C.cyan}└──────────────────────�
     }
     try {
       // 1. Disconnect current dialect (via switcher — gere orm/net en interne).
-      const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+      const { disconnect: switcherDisconnect } = await import('@mostajs/data-plug');
       try { await switcherDisconnect(); } catch {}
       dialect = null;
       entityService = null;
@@ -1010,7 +1010,7 @@ ${C.cyan}└──────────────────────�
 
       // 4. Si connect demandé, reconnecter (via switcher — ignore orm/net).
       if (body.connect) {
-        const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+        const { disconnect: switcherDisconnect } = await import('@mostajs/data-plug');
         await switcherDisconnect();
         dialect = (await switcherGetDialect()) as unknown as IDialect;
         entityService = new EntityService(dialect);
@@ -1114,7 +1114,7 @@ ${C.cyan}└──────────────────────�
       }
 
       // 2. Disconnect current dialect (via switcher — gere orm/net en interne).
-      const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+      const { disconnect: switcherDisconnect } = await import('@mostajs/data-plug');
       try { await switcherDisconnect(); } catch {}
       dialect = null;
       entityService = null;
@@ -1124,7 +1124,7 @@ ${C.cyan}└──────────────────────�
       const newUri = getEnv('SGBD_URI', '').replace(/:([^@]+)@/, ':***@');
       try {
         if (getEnv('DB_DIALECT') && getEnv('SGBD_URI')) {
-          const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+          const { disconnect: switcherDisconnect } = await import('@mostajs/data-plug');
           await switcherDisconnect();
           dialect = (await switcherGetDialect()) as unknown as IDialect;
           entityService = new EntityService(dialect);
@@ -1190,8 +1190,8 @@ ${C.cyan}└──────────────────────�
         list = list.filter((p: any) => p.name === 'default');
       } else {
         try {
-          const { getNamedConnection } = await import('@mostajs/orm');
-          const portalDb = getNamedConnection('cloud-portal');
+          const { getNamedConnection } = await import('@mostajs/data-plug');
+          const portalDb = (await getNamedConnection('cloud-portal')) as unknown as IDialect | null;
           if (portalDb) {
             const { resolveApiKey } = await import('@mostajs/api-keys/server');
             const apiKey = await resolveApiKey(portalDb, rawKey);

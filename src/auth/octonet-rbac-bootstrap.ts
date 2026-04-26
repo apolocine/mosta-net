@@ -67,7 +67,7 @@ export async function bootstrapRbac(
     // On instancie directement les Repository avec le `dialect` reçu — qui
     // est l'orm singleton (= meta DB) après le reset architectural. Les
     // helpers rbac (createAdmin, seedRBAC) marcheraient aussi puisqu'ils
-    // passent par octoswitcher.getDialect() qui retourne ce même singleton.
+    // passent par data-plug.getDialect() qui retourne ce même singleton.
     // On préfère la version explicite ici pour rester lisible au boot.
     const {
       UserSchema, RoleSchema, PermissionSchema, PermissionCategorySchema, AccountSchema,
