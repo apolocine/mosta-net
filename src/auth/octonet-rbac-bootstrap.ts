@@ -61,13 +61,19 @@ export async function bootstrapRbac(
   try {
     // ── Lazy-load all dependencies (avoid hard peer-dep at module-load) ──
     // Everything from '/server' so we don't pull in the UI barrel (lucide-react etc.)
+    //
+    // Note: on n'utilise PAS createAdmin() ni seedRBAC() de @mostajs/rbac
+    // ici, car ces helpers passent par getRbacRepos() → @mostajs/octoswitcher
+    // (singleton global) — donc ils écriraient sur le default project DB
+    // au lieu de la meta DB. On instancie directement les Repository avec
+    // le `dialect` reçu en paramètre (qui peut être metaDialect).
     const {
       UserSchema, RoleSchema, PermissionSchema, PermissionCategorySchema, AccountSchema,
-      seedRBAC, createAdmin, OCTONET_RBAC_SEED,
+      OCTONET_RBAC_SEED,
       UserRepository, RoleRepository, AccountRepository,
+      PermissionRepository, PermissionCategoryRepository,
     } = await import('@mostajs/rbac/server')
-    //const { hashPassword } = await import('@mostajs/auth/server')   
-    
+
     const { hashPassword } = await import('@mostajs/auth/lib/password')
     const { ApiKeySchema } = await import('@mostajs/api-keys')
     const { generateApiKey, getApiKeyRepo } = await import('@mostajs/api-keys/server')
@@ -83,10 +89,41 @@ export async function bootstrapRbac(
     }
     log('schemas registered + tables ensured')
 
-    // ── 2. Seed RBAC (idempotent — upsert by name) ──
+    // Construct repositories bound to OUR dialect (not the global singleton).
+    const userRepo    = new UserRepository(dialect)
+    const roleRepo    = new RoleRepository(dialect)
+    const permRepo    = new PermissionRepository(dialect)
+    const catRepo     = new PermissionCategoryRepository(dialect)
+    const accountRepo = new AccountRepository(dialect)
+
+    // ── 2. Seed RBAC (idempotent — upsert by name, on OUR dialect) ──
     if (!opts.skipSeed) {
-      const r = await seedRBAC(OCTONET_RBAC_SEED)
-      log(`seeded ${r.categoryCount} categories, ${r.permissionCount} permissions, ${r.roleCount} roles`)
+      // 2a. Categories
+      for (const cat of OCTONET_RBAC_SEED.categories) {
+        await (catRepo as any).upsert({ name: cat.name }, cat)
+      }
+      // 2b. Permissions — build code→id map for role wiring
+      const permissionMap: Record<string, string> = {}
+      for (const pDef of OCTONET_RBAC_SEED.permissions) {
+        const displayName = pDef.name || pDef.code
+        const perm = await (permRepo as any).upsert(
+          { name: displayName },
+          { name: displayName, description: pDef.description, category: pDef.category },
+        )
+        permissionMap[pDef.code] = (perm as any).id
+      }
+      // 2c. Roles — link to permission IDs
+      for (const [, roleDef] of Object.entries(OCTONET_RBAC_SEED.roles)) {
+        const r = roleDef as { name: string; description?: string; permissions: string[] }
+        const permissionIds = r.permissions
+          .map((code: string) => permissionMap[code])
+          .filter(Boolean)
+        await (roleRepo as any).upsert(
+          { name: r.name },
+          { name: r.name, description: r.description, permissions: permissionIds },
+        )
+      }
+      log(`seeded ${OCTONET_RBAC_SEED.categories.length} categories, ${OCTONET_RBAC_SEED.permissions.length} permissions, ${Object.keys(OCTONET_RBAC_SEED.roles).length} roles`)
     }
 
     // ── 3. Admin user (env vars resolved via @mostajs/config — supports profile cascade) ──
@@ -98,27 +135,53 @@ export async function bootstrapRbac(
         error: 'OCTONET_ADMIN_EMAIL and OCTONET_ADMIN_PASSWORD required at first bootstrap (or pass via opts)',
       }
     }
-    const adminResult = await createAdmin({
-      email:     adminEmail,
-      password:  adminPassword,
-      firstName: opts.adminFirstName || getEnv('OCTONET_ADMIN_FIRSTNAME', 'Admin'),
-      lastName:  opts.adminLastName  || getEnv('OCTONET_ADMIN_LASTNAME',  'Octonet'),
-      roleName:  'admin',
-    })
-    if (!adminResult.ok || !adminResult.userId) {
-      return { ok: false, error: `createAdmin failed: ${adminResult.error || 'unknown'}` }
+    // Manual createAdmin equivalent — bound to OUR dialect.
+    const adminFirstName = opts.adminFirstName || getEnv('OCTONET_ADMIN_FIRSTNAME', 'Admin')
+    const adminLastName  = opts.adminLastName  || getEnv('OCTONET_ADMIN_LASTNAME',  'Octonet')
+    let adminUser = await userRepo.findByEmail(adminEmail.toLowerCase()) as any
+    if (!adminUser) {
+      adminUser = await userRepo.create({
+        email:     adminEmail.toLowerCase(),
+        password:  await hashPassword(adminPassword),
+        firstName: adminFirstName,
+        lastName:  adminLastName,
+        status:    'active',
+      } as any) as any
+      const adminRole = await (roleRepo as any).findByName('admin')
+      if (adminRole && adminUser?.id) {
+        await userRepo.addRole(adminUser.id, (adminRole as any).id)
+      }
     }
+    if (!adminUser?.id) {
+      return { ok: false, error: 'admin user creation failed' }
+    }
+    const adminResult = { ok: true as const, userId: adminUser.id, email: adminUser.email }
     log(`admin user: ${adminResult.email} (id=${adminResult.userId})`)
 
-    // ── 4. Trial Account ──
-    const accountRepo = new AccountRepository(dialect)
-    let trialAccount = await accountRepo.findByType('trial')
+    // ── Bootstrap data (env-driven, defaults preserved) ──
+    // Externalisé pour éviter les magic strings dans le code. Les defaults
+    // sont publics par design (apparaissent dans les logs, dans la doc PH).
+    const trialAccountName    = getEnv('OCTONET_TRIAL_ACCOUNT_NAME',    'trial-playground')
+    const trialAccountType    = getEnv('OCTONET_TRIAL_ACCOUNT_TYPE',    'trial')
+    const trialAccountPlan    = getEnv('OCTONET_TRIAL_ACCOUNT_PLAN',    'trial')
+    const trialAccountStatus  = getEnv('OCTONET_TRIAL_ACCOUNT_STATUS',  'active')
+    const publicUserEmail     = getEnv('OCTONET_PUBLIC_USER_EMAIL',     'public-demo@octonet.amia.fr')
+    const publicUserFirstName = getEnv('OCTONET_PUBLIC_USER_FIRSTNAME', 'Public')
+    const publicUserLastName  = getEnv('OCTONET_PUBLIC_USER_LASTNAME',  'Demo')
+    const publicUserStatus    = getEnv('OCTONET_PUBLIC_USER_STATUS',    'active')
+    const publicAccountName   = getEnv('OCTONET_PUBLIC_ACCOUNT_NAME',   'public-system')
+    const publicAccountType   = getEnv('OCTONET_PUBLIC_ACCOUNT_TYPE',   'system')
+    const publicAccountPlan   = getEnv('OCTONET_PUBLIC_ACCOUNT_PLAN',   'free')
+    const publicAccountStatus = getEnv('OCTONET_PUBLIC_ACCOUNT_STATUS', 'active')
+
+    // ── 4. Trial Account (accountRepo was created above, bound to OUR dialect) ──
+    let trialAccount = await accountRepo.findByType(trialAccountType)
     if (!trialAccount) {
       trialAccount = await accountRepo.create({
-        name:   'trial-playground',
-        type:   'trial',
-        plan:   'trial',
-        status: 'active',
+        name:   trialAccountName,
+        type:   trialAccountType,
+        plan:   trialAccountPlan,
+        status: trialAccountStatus,
         owner:  adminResult.userId,
       } as any)
       log(`trial account created: ${trialAccount.id}`)
@@ -126,38 +189,35 @@ export async function bootstrapRbac(
       log(`trial account exists: ${trialAccount.id}`)
     }
 
-    // ── 5. Public-demo User ──
-    const userRepo = new UserRepository(dialect)
-    const publicEmail = 'public-demo@octonet.amia.fr'
-    let publicUser = await userRepo.findByEmail(publicEmail)
+    // ── 5. Public-demo User (userRepo, roleRepo bound to OUR dialect already) ──
+    let publicUser = await userRepo.findByEmail(publicUserEmail) as any
     if (!publicUser) {
       const randomPwd = randomBytes(32).toString('hex')
       publicUser = await userRepo.create({
-        email:     publicEmail,
+        email:     publicUserEmail,
         password:  await hashPassword(randomPwd),
-        firstName: 'Public',
-        lastName:  'Demo',
-        status:    'active',
-      } as any)
+        firstName: publicUserFirstName,
+        lastName:  publicUserLastName,
+        status:    publicUserStatus,
+      } as any) as any
       // Attach role 'public'
-      const roleRepo = new RoleRepository(dialect)
-      const publicRole = await roleRepo.findOne({ name: 'public' })
-      if (publicRole && (publicUser as any).id) {
-        await userRepo.addRole((publicUser as any).id, (publicRole as any).id)
+      const publicRole = await (roleRepo as any).findOne({ name: 'public' })
+      if (publicRole && publicUser?.id) {
+        await userRepo.addRole(publicUser.id, (publicRole as any).id)
       }
-      log(`public-demo user created: ${(publicUser as any).id}`)
+      log(`public-demo user created: ${publicUser?.id}`)
     } else {
-      log(`public-demo user exists: ${(publicUser as any).id}`)
+      log(`public-demo user exists: ${publicUser.id}`)
     }
 
     // ── 6. Public-system Account ──
-    let publicAccount = await accountRepo.findOne({ name: 'public-system', type: 'system' })
+    let publicAccount = await accountRepo.findOne({ name: publicAccountName, type: publicAccountType })
     if (!publicAccount) {
       publicAccount = await accountRepo.create({
-        name:   'public-system',
-        type:   'system',
-        plan:   'free',
-        status: 'active',
+        name:   publicAccountName,
+        type:   publicAccountType,
+        plan:   publicAccountPlan,
+        status: publicAccountStatus,
         owner:  (publicUser as any).id,
       } as any)
       log(`public-system account created: ${publicAccount.id}`)
@@ -167,7 +227,11 @@ export async function bootstrapRbac(
 
     // ── 7. Public ApiKey scoped to project 'default' (read-only) ──
     const apikeyRepo = getApiKeyRepo(dialect)
-    const publicKeyLabel = opts.publicKeyLabel || 'public-default'
+    const publicKeyLabel       = opts.publicKeyLabel || getEnv('OCTONET_PUBLIC_APIKEY_LABEL', 'public-default')
+    const publicKeyEnv         = (getEnv('OCTONET_PUBLIC_APIKEY_ENV', 'live') as 'live' | 'test')
+    const publicKeyProjects    = (getEnv('OCTONET_PUBLIC_APIKEY_PROJECTS', 'default')).split(',').map(s => s.trim()).filter(Boolean)
+    const publicKeyOperations  = (getEnv('OCTONET_PUBLIC_APIKEY_OPERATIONS', 'read')).split(',').map(s => s.trim()).filter(Boolean)
+    const publicKeyTransports  = (getEnv('OCTONET_PUBLIC_APIKEY_TRANSPORTS', 'rest,mcp')).split(',').map(s => s.trim()).filter(Boolean)
     const existingKey = await apikeyRepo.findOne({
       account: (publicAccount as any).id,
       label:   publicKeyLabel,
@@ -175,16 +239,16 @@ export async function bootstrapRbac(
     } as any)
     let publicApiKey: string | null = null
     if (!existingKey) {
-      const generated = generateApiKey('live')
+      const generated = generateApiKey(publicKeyEnv)
       await apikeyRepo.create({
         account:    (publicAccount as any).id,
         prefix:     generated.prefix,
         hash:       generated.hash,
         label:      publicKeyLabel,
         permissions: {
-          projects:   ['default'],
-          operations: ['read'],
-          transports: ['rest', 'mcp'],
+          projects:   publicKeyProjects,
+          operations: publicKeyOperations,
+          transports: publicKeyTransports,
         },
         enabled:    true,
         usageCount: 0,
