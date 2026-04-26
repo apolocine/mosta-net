@@ -64,11 +64,11 @@ export async function bootstrapRbac(
     // ── Lazy-load all dependencies (avoid hard peer-dep at module-load) ──
     // Everything from '/server' so we don't pull in the UI barrel (lucide-react etc.)
     //
-    // Note: on n'utilise PAS createAdmin() ni seedRBAC() de @mostajs/rbac
-    // ici, car ces helpers passent par getRbacRepos() → @mostajs/octoswitcher
-    // (singleton global) — donc ils écriraient sur le default project DB
-    // au lieu de la meta DB. On instancie directement les Repository avec
-    // le `dialect` reçu en paramètre (qui peut être metaDialect).
+    // On instancie directement les Repository avec le `dialect` reçu — qui
+    // est l'orm singleton (= meta DB) après le reset architectural. Les
+    // helpers rbac (createAdmin, seedRBAC) marcheraient aussi puisqu'ils
+    // passent par octoswitcher.getDialect() qui retourne ce même singleton.
+    // On préfère la version explicite ici pour rester lisible au boot.
     const {
       UserSchema, RoleSchema, PermissionSchema, PermissionCategorySchema, AccountSchema,
       OCTONET_RBAC_SEED,

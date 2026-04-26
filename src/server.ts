@@ -4,8 +4,16 @@
 
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import { EntityService, getAllSchemas, getDialect, getSchema, registerSchemas, getSchemaByCollection } from '@mostajs/orm';
-import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
+import { EntityService, getAllSchemas, getSchema, registerSchemas, getSchemaByCollection } from '@mostajs/orm';
+import type { EntitySchema, OrmRequest, OrmResponse, IDialect } from '@mostajs/orm';
+// Octonet's singleton dialect comes from octoswitcher (not @mostajs/orm
+// directly) so an Octonet instance can EITHER hit a real DB (MOSTA_DATA=orm)
+// OR proxy to an upstream Octonet (MOSTA_DATA=net). This enables chaining :
+// octonet_edge (net) → octonet_regional (net) → octonet_central (orm).
+// Per-project dialects (default + N user projects) are still managed by
+// ProjectManager via openIsolatedDialect — they are explicit isolation, not
+// part of the chain.
+import { getDialect as switcherGetDialect } from '@mostajs/octoswitcher';
 import { ProjectManager } from '@mostajs/mproject';
 import type { ProjectConfig } from '@mostajs/mproject';
 import { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip } from './lib/schema-loader.js';
@@ -57,16 +65,24 @@ export async function startServer(): Promise<NetServer> {
   // 1. Load net config
   const config = loadNetConfig();
 
-  // 2. Connect ORM (non-blocking — server starts even if DB is unavailable)
+  // 2. Connect ORM singleton (non-blocking — server starts even if DB is unavailable)
+  //
+  // IMPORTANT — ce singleton DOIT pointer sur la meta DB (User, Account,
+  // ApiKey, scopes, plans). C'est ce que rbac/api-keys/auth/subscriptions-plan
+  // résolvent quand ils appellent `octoswitcher.getDialect()` (principe :
+  // aucun module ne hardcode son accès DB — tous suivent le switcher du hôte).
+  //
+  // Les DBs PER-PROJET (entités userland Client/Product/Order) sont gérées
+  // par ProjectManager via openIsolatedDialect — hors du singleton.
   let dialect: import('@mostajs/orm').IDialect | null = null;
   let entityService: EntityService | null = null;
   let dbError = '';
 
   try {
-    if (!getEnv('DB_DIALECT') || !getEnv('SGBD_URI')) {
-      throw new Error('DB_DIALECT et SGBD_URI non configurés — utilisez l\'IHM pour choisir un dialecte');
-    }
-    dialect = await getDialect();
+    // Le switcher valide en interne : MOSTA_NET_URL si MOSTA_DATA=net,
+    // ou DB_DIALECT+SGBD_URI si MOSTA_DATA=orm. Le caller ne sait ni n'a
+    // à savoir avec qui il parle (orm direct ou net upstream).
+    dialect = (await switcherGetDialect()) as unknown as IDialect;
     entityService = new EntityService(dialect);
   } catch (e: unknown) {
     dbError = e instanceof Error ? e.message : String(e);
@@ -84,25 +100,6 @@ export async function startServer(): Promise<NetServer> {
   let mcpTransportRef: McpTransport | null = null;
   if (dialect && entityService) {
     pm.setDefault('default', dialect, []);
-  }
-
-  // 3c. Resolve meta dialect — OCTONET_META_URI hosts shared identity tables
-  // (User, Role, ApiKey, Account, …) when Octonet runs alongside Octocloud.
-  // Falls back to the default project dialect when not set (rétrocompat).
-  let metaDialect: import('@mostajs/orm').IDialect | null = dialect;
-  try {
-    const { resolveMetaDialect } = await import('./core/meta-dialect.js');
-    const meta = await resolveMetaDialect(dialect);
-    metaDialect = meta.dialect;
-    if (meta.isolated) {
-      console.log(`  ✓ Meta DB connected (isolated) — ${meta.uri?.replace(/:([^@]+)@/, ':***@')}`);
-    } else if (dialect) {
-      console.log(`  ✓ Meta DB = default project dialect (no OCTONET_META_URI set)`);
-    }
-  } catch (e: any) {
-    console.warn(`  ⚠ Meta DB resolution failed: ${e?.message || e}`);
-    console.warn(`    Falling back to default project dialect for RBAC / ApiKey tables.`);
-    metaDialect = dialect;
   }
 
   // 4. Get schemas: schemas.json → SCHEMAS_PATH → getAllSchemas() (embedded mode)
@@ -136,12 +133,14 @@ export async function startServer(): Promise<NetServer> {
   // 4b-bis. Bootstrap RBAC + tenancy (User, Role, Permission, Account, ApiKey)
   // Idempotent — safe to call on every boot. Emits the public demo apikey
   // in clear ONCE (only when first run). Failure is non-fatal.
-  // RBAC tables live in metaDialect (shared with Octocloud when configured).
-  if (metaDialect) {
+  // RBAC tables live in the orm singleton (= the meta DB). Octocloud reads
+  // the same data via NetClient proxy → REST → Octonet → singleton. One
+  // source of truth. Zero schema drift.
+  if (dialect) {
     try {
       const { bootstrapRbac } = await import('./auth/octonet-rbac-bootstrap.js');
       const { getEnvBool } = await import('@mostajs/config');
-      const r = await bootstrapRbac(metaDialect, {
+      const r = await bootstrapRbac(dialect, {
         verbose: getEnvBool('OCTONET_BOOTSTRAP_VERBOSE', false),
       });
       if (r.ok) {
@@ -155,17 +154,17 @@ export async function startServer(): Promise<NetServer> {
   }
 
   // 4b-ter. Register canonical scopes (projects/operations/transports) for the
-  // apikey scope registry. Scopes live in metaDialect (alongside api_keys).
-  if (metaDialect) {
+  // apikey scope registry. Scopes live in dialect (alongside api_keys).
+  if (dialect) {
     try {
       const { registerScope, ScopeSchema, ScopeValueSchema } = await import('@mostajs/api-keys/server');
       // Ensure Scope tables exist
       registerSchemas([ScopeSchema as any, ScopeValueSchema as any]);
-      if (typeof (metaDialect as any).initSchema === 'function') {
-        await (metaDialect as any).initSchema([ScopeSchema, ScopeValueSchema]);
+      if (typeof (dialect as any).initSchema === 'function') {
+        await (dialect as any).initSchema([ScopeSchema, ScopeValueSchema]);
       }
       // operations — static, low-cardinality
-      await registerScope(metaDialect, {
+      await registerScope(dialect, {
         name: 'operations', label: 'CRUD operations',
         description: 'Coarse CRUD families enforced on entity routes',
         cardinality: 'low', valuesSource: 'static',
@@ -177,7 +176,7 @@ export async function startServer(): Promise<NetServer> {
         ],
       });
       // transports — static, low-cardinality
-      await registerScope(metaDialect, {
+      await registerScope(dialect, {
         name: 'transports', label: 'Network transports',
         description: 'Wire protocols served by Octonet',
         cardinality: 'low', valuesSource: 'static',
@@ -199,7 +198,7 @@ export async function startServer(): Promise<NetServer> {
       // projects — dynamic, high-cardinality, sourced from the Project entity
       // (note: in fallback projects-tree.json mode this list will resolve empty
       //  and the host should fall back to a custom resolver if needed).
-      await registerScope(metaDialect, {
+      await registerScope(dialect, {
         name: 'projects', label: 'Projects',
         description: 'Project slugs the key can access',
         cardinality: 'high', valuesSource: 'dynamic',
@@ -430,7 +429,7 @@ ${C.cyan}└──────────────────────�
       const { getEnvBool } = await import('@mostajs/config');
       const globalMiddlewares = [
         createSanitizerMiddleware(),
-        createApiKeyMiddleware(() => metaDialect, { openMode: getEnvBool('OCTONET_OPEN_MODE', false) }),
+        createApiKeyMiddleware(() => dialect, { openMode: getEnvBool('OCTONET_OPEN_MODE', false) }),
       ];
       protectedOrmHandler = composeMiddleware(globalMiddlewares, ormHandler);
       console.log(`  ✓ Protected ormHandler ready (sanitizer + apikey global wrapper)`);
@@ -476,7 +475,7 @@ ${C.cyan}└──────────────────────�
       const { createApiKeyMiddleware } = await import('./auth/apikey-middleware.js');
       const { getEnvBool } = await import('@mostajs/config');
       transport.use(createApiKeyMiddleware(
-        () => metaDialect,
+        () => dialect,
         { openMode: getEnvBool('OCTONET_OPEN_MODE', false) },
       ));
       console.log(`  ✓ ApiKey middleware on ${transport.name}`);
@@ -512,7 +511,7 @@ ${C.cyan}└──────────────────────�
       // SSE endpoint: GET /events — auth-guarded
       app.get(ssePath, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
-        const auth = await authGuard(metaDialect, req, { transport: 'sse', operation: 'read' });
+        const auth = await authGuard(dialect, req, { transport: 'sse', operation: 'read' });
         if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         reply.hijack();
         sseTransport.addClient(reply.raw);
@@ -543,7 +542,7 @@ ${C.cyan}└──────────────────────�
         // Auth check on every GraphQL request via the context hook.
         // Throwing inside context aborts the request before resolvers run.
         context: async (req: any, reply: any) => {
-          const auth = await authGuard(metaDialect, req, { transport: 'graphql' });
+          const auth = await authGuard(dialect, req, { transport: 'graphql' });
           if (!auth.ok) {
             reply.code(auth.status!);
             const err = new Error(auth.body?.error?.message || 'unauthorized');
@@ -563,7 +562,7 @@ ${C.cyan}└──────────────────────�
 
       app.post(rpcPath, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
-        const auth = await authGuard(metaDialect, req, { transport: 'jsonrpc' });
+        const auth = await authGuard(dialect, req, { transport: 'jsonrpc' });
         if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const result = await rpcTransport.handleBody(req.body);
         return result;
@@ -593,7 +592,7 @@ ${C.cyan}└──────────────────────�
       // public-default key's read-only scope still applies, so writes stay blocked.
       app.all(mcpPath, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
-        const auth = await authGuard(metaDialect, req, {
+        const auth = await authGuard(dialect, req, {
           transport: 'mcp',
           fallbackPublicLabel: 'public-default',
         });
@@ -613,7 +612,7 @@ ${C.cyan}└──────────────────────�
       app.all(`${trpcPath}/*`, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
         const op = req.method === 'GET' ? 'read' : 'write';
-        const auth = await authGuard(metaDialect, req, { transport: 'trpc', operation: op as any });
+        const auth = await authGuard(dialect, req, { transport: 'trpc', operation: op as any });
         if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const result = await trpcTransport.handleRequest(req.url, req.body as any);
         return result;
@@ -642,7 +641,7 @@ ${C.cyan}└──────────────────────�
       app.all(`${odataPath}/*`, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
         const op = req.method === 'GET' ? 'read' : 'write';
-        const auth = await authGuard(metaDialect, req, { transport: 'odata', operation: op as any });
+        const auth = await authGuard(dialect, req, { transport: 'odata', operation: op as any });
         if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const q = req.query as Record<string, string>;
         const result = await odataTransport.handleRequest(req.method, req.url, q, req.body);
@@ -942,10 +941,11 @@ ${C.cyan}└──────────────────────�
 
   app.post('/api/reconnect', async () => {
     try {
-      // Force new connection (disconnect singleton first)
-      const { disconnectDialect } = await import('@mostajs/orm');
-      try { await disconnectDialect(); } catch {}
-      dialect = await getDialect();
+      // Force new connection — switcher gere la fermeture physique selon
+      // le mode (orm/net), le caller ignore avec qui il parle.
+      const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+      await switcherDisconnect();
+      dialect = (await switcherGetDialect()) as unknown as IDialect;
       entityService = new EntityService(dialect);
       // Re-init schemas if available
       const currentSchemas = getAllSchemas();
@@ -967,9 +967,9 @@ ${C.cyan}└──────────────────────�
       return { ok: false, error: 'dialect et uri requis' };
     }
     try {
-      // 1. Disconnect current dialect
-      const { disconnectDialect } = await import('@mostajs/orm');
-      try { await disconnectDialect(); } catch {}
+      // 1. Disconnect current dialect (via switcher — gere orm/net en interne).
+      const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+      try { await switcherDisconnect(); } catch {}
       dialect = null;
       entityService = null;
 
@@ -1008,9 +1008,11 @@ ${C.cyan}└──────────────────────�
         fs.writeFileSync(envPath, cleaned.join('\n') + '\n');
       }
 
-      // 4. Si connect demandé, reconnecter
+      // 4. Si connect demandé, reconnecter (via switcher — ignore orm/net).
       if (body.connect) {
-        dialect = await getDialect();
+        const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+        await switcherDisconnect();
+        dialect = (await switcherGetDialect()) as unknown as IDialect;
         entityService = new EntityService(dialect);
         const currentSchemas = getAllSchemas();
         if (currentSchemas.length > 0) {
@@ -1111,9 +1113,9 @@ ${C.cyan}└──────────────────────�
         }
       }
 
-      // 2. Disconnect current DB
-      const { disconnectDialect } = await import('@mostajs/orm');
-      try { await disconnectDialect(); } catch {}
+      // 2. Disconnect current dialect (via switcher — gere orm/net en interne).
+      const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+      try { await switcherDisconnect(); } catch {}
       dialect = null;
       entityService = null;
 
@@ -1122,7 +1124,9 @@ ${C.cyan}└──────────────────────�
       const newUri = getEnv('SGBD_URI', '').replace(/:([^@]+)@/, ':***@');
       try {
         if (getEnv('DB_DIALECT') && getEnv('SGBD_URI')) {
-          dialect = await getDialect();
+          const { disconnect: switcherDisconnect } = await import('@mostajs/octoswitcher');
+          await switcherDisconnect();
+          dialect = (await switcherGetDialect()) as unknown as IDialect;
           entityService = new EntityService(dialect);
           const currentSchemas = getAllSchemas();
           if (currentSchemas.length > 0) {
@@ -1567,16 +1571,16 @@ ${C.cyan}└──────────────────────�
   registerProjectRoutes(app, pm, protectedOrmHandler);
 
   // 8g-bis. T1 — sandbox publique /try (POST=create, GET=HTML form, cleanup TTL 7j)
-  // The trial User/Account/ApiKey rows live in metaDialect (shared with Octocloud)
+  // The trial User/Account/ApiKey rows live in the orm singleton (= meta DB).
   // so a sandbox apikey emitted on /try is visible from the Octocloud admin.
   // The sandbox SQLite file is owned by the per-trial Project (handled by `pm`).
-  if (metaDialect) {
+  if (dialect) {
     try {
       const { registerTryRoutes, startTrialCleanupJob } = await import('./routes/try.js');
       const { registerTryPage } = await import('./routes/try-page.js');
       registerTryPage(app);
-      registerTryRoutes(app, { dialect: metaDialect, pm: pm as any });
-      startTrialCleanupJob({ dialect: metaDialect, pm: pm as any });
+      registerTryRoutes(app, { dialect: dialect, pm: pm as any });
+      startTrialCleanupJob({ dialect: dialect, pm: pm as any });
       console.log(`  ✓ T1 sandbox endpoint /try ready (rate-limited 10/h/IP, TTL 7d)`);
     } catch (e: any) {
       console.warn(`  ⚠ /try endpoint unavailable: ${e?.message || e}`);
