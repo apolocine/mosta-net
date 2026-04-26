@@ -135,32 +135,14 @@ export async function bootstrapRbac(
         error: 'OCTONET_ADMIN_EMAIL and OCTONET_ADMIN_PASSWORD required at first bootstrap (or pass via opts)',
       }
     }
-    // Manual createAdmin equivalent — bound to OUR dialect.
-    const adminFirstName = opts.adminFirstName || getEnv('OCTONET_ADMIN_FIRSTNAME', 'Admin')
-    const adminLastName  = opts.adminLastName  || getEnv('OCTONET_ADMIN_LASTNAME',  'Octonet')
-    let adminUser = await userRepo.findByEmail(adminEmail.toLowerCase()) as any
-    if (!adminUser) {
-      adminUser = await userRepo.create({
-        email:     adminEmail.toLowerCase(),
-        password:  await hashPassword(adminPassword),
-        firstName: adminFirstName,
-        lastName:  adminLastName,
-        status:    'active',
-      } as any) as any
-      const adminRole = await (roleRepo as any).findByName('admin')
-      if (adminRole && adminUser?.id) {
-        await userRepo.addRole(adminUser.id, (adminRole as any).id)
-      }
-    }
-    if (!adminUser?.id) {
-      return { ok: false, error: 'admin user creation failed' }
-    }
-    const adminResult = { ok: true as const, userId: adminUser.id, email: adminUser.email }
-    log(`admin user: ${adminResult.email} (id=${adminResult.userId})`)
-
     // ── Bootstrap data (env-driven, defaults preserved) ──
     // Externalisé pour éviter les magic strings dans le code. Les defaults
     // sont publics par design (apparaissent dans les logs, dans la doc PH).
+    const adminRoleName       = getEnv('OCTONET_ADMIN_ROLE_NAME',       'admin')
+    const adminUserStatus     = getEnv('OCTONET_ADMIN_USER_STATUS',     'active')
+    const adminFirstName      = opts.adminFirstName || getEnv('OCTONET_ADMIN_FIRSTNAME', 'Admin')
+    const adminLastName       = opts.adminLastName  || getEnv('OCTONET_ADMIN_LASTNAME',  'Octonet')
+    const publicRoleName      = getEnv('OCTONET_PUBLIC_ROLE_NAME',      'public')
     const trialAccountName    = getEnv('OCTONET_TRIAL_ACCOUNT_NAME',    'trial-playground')
     const trialAccountType    = getEnv('OCTONET_TRIAL_ACCOUNT_TYPE',    'trial')
     const trialAccountPlan    = getEnv('OCTONET_TRIAL_ACCOUNT_PLAN',    'trial')
@@ -173,6 +155,27 @@ export async function bootstrapRbac(
     const publicAccountType   = getEnv('OCTONET_PUBLIC_ACCOUNT_TYPE',   'system')
     const publicAccountPlan   = getEnv('OCTONET_PUBLIC_ACCOUNT_PLAN',   'free')
     const publicAccountStatus = getEnv('OCTONET_PUBLIC_ACCOUNT_STATUS', 'active')
+
+    // Manual createAdmin equivalent — bound to OUR dialect.
+    let adminUser = await userRepo.findByEmail(adminEmail.toLowerCase()) as any
+    if (!adminUser) {
+      adminUser = await userRepo.create({
+        email:     adminEmail.toLowerCase(),
+        password:  await hashPassword(adminPassword),
+        firstName: adminFirstName,
+        lastName:  adminLastName,
+        status:    adminUserStatus,
+      } as any) as any
+      const adminRole = await (roleRepo as any).findByName(adminRoleName)
+      if (adminRole && adminUser?.id) {
+        await userRepo.addRole(adminUser.id, (adminRole as any).id)
+      }
+    }
+    if (!adminUser?.id) {
+      return { ok: false, error: 'admin user creation failed' }
+    }
+    const adminResult = { ok: true as const, userId: adminUser.id, email: adminUser.email }
+    log(`admin user: ${adminResult.email} (id=${adminResult.userId})`)
 
     // ── 4. Trial Account (accountRepo was created above, bound to OUR dialect) ──
     let trialAccount = await accountRepo.findByType(trialAccountType)
@@ -201,7 +204,7 @@ export async function bootstrapRbac(
         status:    publicUserStatus,
       } as any) as any
       // Attach role 'public'
-      const publicRole = await (roleRepo as any).findOne({ name: 'public' })
+      const publicRole = await (roleRepo as any).findOne({ name: publicRoleName })
       if (publicRole && publicUser?.id) {
         await userRepo.addRole(publicUser.id, (publicRole as any).id)
       }
