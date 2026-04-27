@@ -6,20 +6,12 @@ import type { FastifyInstance } from 'fastify';
 import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
 import type { TransportContext } from '../core/types.js';
 import { McpTransport } from '../transports/mcp.transport.js';
-import { randomBytes, scryptSync } from 'crypto';
 import { getEnv } from '@mostajs/config';
 
-/** Hash password — uses bcryptjs if available, falls back to scrypt */
+/** Hash password — délégué à @mostajs/auth (bcryptjs avec fallback unifié). */
 async function hashPassword(plain: string): Promise<string> {
-  try {
-    const bcrypt = await import('bcryptjs');
-    return bcrypt.default.hash(plain, 10);
-  } catch {
-    // Fallback: scrypt with salt, format: $scrypt$salt$hash
-    const salt = randomBytes(16).toString('hex');
-    const hash = scryptSync(plain, salt, 64).toString('hex');
-    return `$scrypt$${salt}$${hash}`;
-  }
+  const { hashPassword: authHash } = await import('@mostajs/auth/lib/password');
+  return authHash(plain);
 }
 
 type OrmHandler = (req: OrmRequest, ctx: TransportContext) => Promise<OrmResponse>;
