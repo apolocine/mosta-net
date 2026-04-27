@@ -40,9 +40,11 @@ export interface BootstrapRbacResult {
   trialAccountId?:  string
   publicUserId?:    string
   publicAccountId?: string
+  /** Portal Account ID — racine de hiérarchie pour les users d'Octocloud (B3 modèle β). */
+  portalAccountId?: string | null
   /** Clé publique en clair — uniquement au tout premier bootstrap. null sinon. */
   publicApiKey?:    string | null
-  /** Clé portal admin (pour Octocloud → Octonet) — uniquement au tout premier bootstrap. null sinon. */
+  /** Clé portal scopée (pour Octocloud → Octonet) — uniquement au tout premier bootstrap. null sinon. */
   portalApiKey?:    string | null
   error?: string
 }
@@ -265,44 +267,61 @@ export async function bootstrapRbac(
       log(`public apikey exists (prefix=${(existingKey as any).prefix}) — not regenerating`)
     }
 
-    // ── 8. Portal ApiKey — admin scope, attached to admin's personal account ──
-    // Used by Octocloud (the Next.js portal) to call Octonet's REST API in
-    // gateway mode (MOSTA_DATA=net). Admin scope = '*' on '*' = full access.
-    // Emitted ONCE at first boot — store in OCTOCLOUD's env as MOSTA_NET_API_KEY.
+    // ── 8. Portal Account dédié (B1) + Portal ApiKey scopée (B2) ──
+    //
+    // B1 : Octocloud est un TENANT à part entière, pas un user. Il a son propre
+    // Account (type='portal'), distinct du compte personnel de l'admin.
+    // Cet Account devient la racine de hiérarchie : tous les comptes personnels
+    // des users de cet octocloud auront `parent = portal_account.id` (B3 modèle β).
+    //
+    // B2 : la portal apikey n'a plus les wildcards `* * *` de l'apikey admin.
+    // Elle est scopée { projects:'*', operations:[read,write], transports:[rest,mcp] }
+    // — pas d'`admin` (endpoints sensibles inaccessibles), transports limités.
+    // Si compromise, dégâts limités au tenant + actions non-admin.
     let portalApiKey: string | null = null
+    let portalAccountId: string | null = null
     const portalEnabled = getEnvBool('OCTONET_PORTAL_APIKEY_ENABLED', true)
     if (portalEnabled) {
-      const portalKeyLabel       = getEnv('OCTONET_PORTAL_APIKEY_LABEL', 'octocloud-portal')
-      const portalKeyEnv         = (getEnv('OCTONET_PORTAL_APIKEY_ENV', 'live') as 'live' | 'test')
-      // Admin needs an Account to own the apikey. Use the admin user as owner.
-      let adminAccount = await accountRepo.findOne({ owner: adminResult.userId, type: 'personal' } as any)
-      if (!adminAccount) {
-        adminAccount = await accountRepo.create({
-          name:   `${adminResult.email}-personal`,
-          type:   'personal',
-          plan:   'admin',
+      const portalKeyLabel    = getEnv('OCTONET_PORTAL_APIKEY_LABEL', 'octocloud-portal')
+      const portalKeyEnv      = (getEnv('OCTONET_PORTAL_APIKEY_ENV', 'live') as 'live' | 'test')
+      const portalAccountName = getEnv('OCTONET_PORTAL_ACCOUNT_NAME', 'octocloud-portal')
+      const portalAccountType = getEnv('OCTONET_PORTAL_ACCOUNT_TYPE', 'portal')
+      const portalAccountPlan = getEnv('OCTONET_PORTAL_ACCOUNT_PLAN', 'unlimited')
+      // Scopes B2 — pas d'admin, transports limités (rest+mcp suffisent au portail).
+      const portalKeyOps        = (getEnv('OCTONET_PORTAL_APIKEY_OPERATIONS', 'read,write')).split(',').map(s => s.trim()).filter(Boolean)
+      const portalKeyTransports = (getEnv('OCTONET_PORTAL_APIKEY_TRANSPORTS', 'rest,mcp')).split(',').map(s => s.trim()).filter(Boolean)
+      const portalKeyProjects   = (getEnv('OCTONET_PORTAL_APIKEY_PROJECTS', '*')).split(',').map(s => s.trim()).filter(Boolean)
+
+      // B1 — récupère ou crée le portal Account dédié.
+      let portalAccount = await accountRepo.findOne({ name: portalAccountName, type: portalAccountType } as any)
+      if (!portalAccount) {
+        portalAccount = await accountRepo.create({
+          name:   portalAccountName,
+          type:   portalAccountType,
+          plan:   portalAccountPlan,
           status: 'active',
           owner:  adminResult.userId,
         } as any)
-        log(`admin personal account created: ${(adminAccount as any).id}`)
+        log(`portal account created: ${(portalAccount as any).id}`)
       }
+      portalAccountId = (portalAccount as any).id
+
       const existingPortalKey = await apikeyRepo.findOne({
-        account: (adminAccount as any).id,
+        account: portalAccountId,
         label:   portalKeyLabel,
         enabled: true,
       } as any)
       if (!existingPortalKey) {
         const generated = generateApiKey(portalKeyEnv)
         await apikeyRepo.create({
-          account:    (adminAccount as any).id,
+          account:    portalAccountId,
           prefix:     generated.prefix,
           hash:       generated.hash,
           label:      portalKeyLabel,
           permissions: {
-            // Wildcard scopes — Octocloud is the trusted portal, full access.
-            projects:   ['*'],
-            operations: ['read', 'write', 'admin'],
-            transports: ['*'],
+            projects:   portalKeyProjects,    // ['*'] — tous projets côté Octonet
+            operations: portalKeyOps,         // ['read','write'] — pas d'admin
+            transports: portalKeyTransports,  // ['rest','mcp'] — restreints
           },
           enabled:    true,
           usageCount: 0,
@@ -310,6 +329,7 @@ export async function bootstrapRbac(
         portalApiKey = generated.full
         console.log(`[rbac-bootstrap] ⚠ portal apikey emitted ONCE → ${generated.full}`)
         console.log(`[rbac-bootstrap] ⚠ paste in Octocloud's MOSTA_NET_API_KEY env var.`)
+        console.log(`[rbac-bootstrap] ⚠ portal account id (for OCTONET_PORTAL_ACCOUNT_ID): ${portalAccountId}`)
       } else {
         log(`portal apikey exists (prefix=${(existingPortalKey as any).prefix}) — not regenerating`)
       }
@@ -322,6 +342,7 @@ export async function bootstrapRbac(
       trialAccountId:  (trialAccount as any).id,
       publicUserId:    (publicUser as any).id,
       publicAccountId: (publicAccount as any).id,
+      portalAccountId,
       publicApiKey,
       portalApiKey,
     }

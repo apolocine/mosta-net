@@ -426,13 +426,19 @@ ${C.cyan}└──────────────────────�
       const { composeMiddleware } = await import('./core/middleware.js');
       const { createSanitizerMiddleware } = await import('./auth/sanitizer-middleware.js');
       const { createApiKeyMiddleware } = await import('./auth/apikey-middleware.js');
+      const { createAccountScopeMiddleware } = await import('./auth/account-scope-middleware.js');
       const { getEnvBool } = await import('@mostajs/config');
       const globalMiddlewares = [
         createSanitizerMiddleware(),
         createApiKeyMiddleware(() => dialect, { openMode: getEnvBool('OCTONET_OPEN_MODE', false) }),
+        // Multi-tenant row-level scoping (B3 modèle β) — filtre les entités
+        // account-scoped (ApiKey, Project, Subscription, Invoice, UsageLog,
+        // Account) selon l'apikey owner. Pour une apikey 'portal', expansion
+        // en {portal, ...children} via Account.parent FK.
+        createAccountScopeMiddleware(() => dialect),
       ];
       protectedOrmHandler = composeMiddleware(globalMiddlewares, ormHandler);
-      console.log(`  ✓ Protected ormHandler ready (sanitizer + apikey global wrapper)`);
+      console.log(`  ✓ Protected ormHandler ready (sanitizer + apikey + account-scope)`);
     } catch (e: any) {
       console.warn(`  ⚠ Protected ormHandler wrapper failed: ${e?.message || e}`);
     }
@@ -481,6 +487,16 @@ ${C.cyan}└──────────────────────�
       console.log(`  ✓ ApiKey middleware on ${transport.name}`);
     } catch (e: any) {
       console.warn(`  ⚠ ApiKey middleware failed on ${transport.name}: ${e?.message || e}`);
+    }
+
+    // Account-scope middleware (B3 modèle β) — multi-tenant row-level filtering.
+    // S'applique APRÈS l'apikey middleware pour avoir ctx.accountId disponible.
+    try {
+      const { createAccountScopeMiddleware } = await import('./auth/account-scope-middleware.js');
+      transport.use(createAccountScopeMiddleware(() => dialect));
+      console.log(`  ✓ Account-scope middleware on ${transport.name}`);
+    } catch (e: any) {
+      console.warn(`  ⚠ Account-scope middleware failed on ${transport.name}: ${e?.message || e}`);
     }
 
     // Wire ORM handler
