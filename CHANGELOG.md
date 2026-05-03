@@ -1,5 +1,44 @@
 # Changelog — @mostajs/net
 
+## 2.7.5 (2026-05-03, unreleased) — Bootstrap system dialect au démarrage (data-plug v1.2.2+)
+
+Étape 2 du chantier **« system dialect séparé du singleton métier »** — câble `bootstrapSystemDialect()` dans le bootstrap d'Octonet-mcp, juste après la connexion du singleton métier et **avant** toute instanciation de middleware/handler système (apikey-middleware, rbac, audit).
+
+### Motivation
+
+Le singleton `getDialect()` est mutable au runtime via `/api/change-dialect`, `/api/reload-config`, `/api/reconnect`. Légitime côté métier — mais les modules **système** (apikeys, RBAC users, audit, plans, payments, project-life metadata) doivent vivre dans une base **stable** qui ne suit pas ces mutations, sinon les apikeys deviennent introuvables après un changement de dialect métier *(bug confirmé en prod, cf. `test-scripts/bug-fixed/`)*.
+
+`@mostajs/data-plug v1.2.2` introduit `getSystemDialect / bootstrapSystemDialect` ; cette release de `@mostajs/net` les câble côté serveur.
+
+### Changements
+
+- **`src/server.ts`** : import `bootstrapSystemDialect` ; appel dans un `try/catch` tolérant aux erreurs de config (le serveur démarre même si `MOSTA_SYSTEM_URI` est mal configuré, avec message diagnostic).
+- **`src/server.ts`** : commentaire ligne 70 réécrit — le singleton métier ne prétend plus *« DOIT pointer sur la meta DB »*. Le rôle système est désormais porté par `bootstrapSystemDialect / getSystemDialect`. Les deux dialects sont documentés in-line.
+- **`package.json`** : bump dépendance `@mostajs/data-plug` `^1.0.0` → `^1.2.2`.
+
+### Comportement
+
+- Si `MOSTA_SYSTEM_DIALECT` + `MOSTA_SYSTEM_URI` sont définis : connexion **système isolée dédiée**, hors singleton métier *(recommandé en prod)*.
+- Sinon : alias transparent vers le singleton métier *(rétro-compat mono-base — comportement identique au pré-v1.2.2 pour les déploiements qui n'ont pas encore basculé)*.
+
+### Configuration recommandée *(prod multi-base)*
+
+```bash
+# Métier (mutable via IHM admin) :
+DB_DIALECT=postgres
+SGBD_URI=postgresql://hmd:***@127.0.0.1:5432/octonet_business
+
+# Système (stable, jamais touché par /api/change-dialect) :
+MOSTA_SYSTEM_DIALECT=postgres
+MOSTA_SYSTEM_URI=postgresql://hmd:***@127.0.0.1:5432/octonet_system
+```
+
+### Étape suivante
+
+Refactor des modules consumers (`@mostajs/api-keys`, `@mostajs/rbac`, `@mostajs/host`, `@mostajs/payment`, `@mostajs/subscriptions-plan`, `@mostajs/project-life`) pour tirer leur dialect via `getSystemDialect()` au lieu de `getDialect()`, **et** patcher leurs caches module-level `let X | null = null` en `WeakMap<IDialect, T>` pour éviter qu'ils capturent une référence dialect périmée *(bug racine : `mosta-api-keys/src/lib/key-factory.ts:9-14`)*.
+
+---
+
 ## 2.2.7 (2026-04-24) — `resolveEntity` accepts entity name AND collection name
 
 ### Bug fix
