@@ -13,7 +13,7 @@ import type { EntitySchema, OrmRequest, OrmResponse, IDialect } from '@mostajs/o
 // Per-project dialects (default + N user projects) are still managed by
 // ProjectManager via openIsolatedDialect — they are explicit isolation, not
 // part of the chain.
-import { getDialect as switcherGetDialect } from '@mostajs/data-plug';
+import { getDialect as switcherGetDialect, bootstrapSystemDialect } from '@mostajs/data-plug';
 import { ProjectManager } from '@mostajs/mproject';
 import type { ProjectConfig } from '@mostajs/mproject';
 import { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip } from './lib/schema-loader.js';
@@ -65,15 +65,28 @@ export async function startServer(): Promise<NetServer> {
   // 1. Load net config
   const config = loadNetConfig();
 
-  // 2. Connect ORM singleton (non-blocking — server starts even if DB is unavailable)
+  // 2. Connect ORM singletons — METIER + SYSTEME séparés (data-plug v1.2.2+).
   //
-  // IMPORTANT — ce singleton DOIT pointer sur la meta DB (User, Account,
-  // ApiKey, scopes, plans). C'est ce que rbac/api-keys/auth/subscriptions-plan
-  // résolvent quand ils appellent `data-plug.getDialect()` (principe :
-  // aucun module ne hardcode son accès DB — tous suivent le switcher du hôte).
+  // Deux dialects distincts pour deux responsabilités distinctes :
+  //
+  //   • MÉTIER  (singleton mutable)  → données applicatives (entités userland).
+  //     Mutable via `/api/change-dialect`, `/api/reload-config`, `/api/reconnect`.
+  //     Lu par les modules métier (transports, routes data, EntityService).
+  //
+  //   • SYSTÈME (stable, hors singleton métier) → User, Account, ApiKey, scopes,
+  //     plans, payments, project-life metadata. Ne bouge JAMAIS au runtime, sinon
+  //     les apikeys/RBAC/audit deviennent introuvables après un change-dialect.
+  //     Lu par les modules système via `data-plug.getSystemDialect()`.
+  //
+  // Bootstrap système :
+  //   - Si MOSTA_SYSTEM_DIALECT + MOSTA_SYSTEM_URI sont définis : connexion
+  //     isolée dédiée (recommandé en prod multi-base).
+  //   - Sinon : alias transparent vers le singleton métier (rétro-compat
+  //     mono-base : tout vit dans la même DB, les apikeys sont protégées
+  //     parce que personne ne mute le dialect en mono-base typique).
   //
   // Les DBs PER-PROJET (entités userland Client/Product/Order) sont gérées
-  // par ProjectManager via openIsolatedDialect — hors du singleton.
+  // par ProjectManager via openIsolatedDialect — hors des deux singletons.
   let dialect: import('@mostajs/orm').IDialect | null = null;
   let entityService: EntityService | null = null;
   let dbError = '';
@@ -93,6 +106,17 @@ export async function startServer(): Promise<NetServer> {
     else if (dbError.includes('not found')) dbError = 'Driver DB non installe — npm install <driver>';
     console.log(`\n  \x1b[33m⚠ DB non connectee:\x1b[0m ${dbError}`);
     console.log(`  Le serveur demarre quand meme — configurez la DB depuis l'IHM\n`);
+  }
+
+  // 2bis. Bootstrap system dialect — DOIT venir AVANT toute instanciation
+  // de middleware/handler système (apikey-middleware, rbac, audit). Tolérant
+  // aux erreurs de config pour ne pas bloquer le démarrage du serveur.
+  try {
+    await bootstrapSystemDialect();
+  } catch (e: unknown) {
+    const sysErr = e instanceof Error ? e.message : String(e);
+    console.log(`\n  \x1b[33m⚠ System dialect non connecte:\x1b[0m ${sysErr}`);
+    console.log(`  Verifier MOSTA_SYSTEM_DIALECT/URI ou laisser vide pour fallback singleton metier\n`);
   }
 
   // 3b. Initialize ProjectManager + MCP ref
@@ -726,6 +750,90 @@ ${C.cyan}└──────────────────────�
   // 8. Health check
   app.get('/health', async () => ({ status: 'ok', transports: enabledNames, entities: schemas.map(s => s.name) }));
 
+  // 8a. Credentials verification endpoint — gateway-aware login bridge
+  //
+  // Octonet est M2M : tout caller (Octocloud, NetClient C#/Java/…, mcp.so)
+  // s'identifie par X-API-Key. Les humains, eux, n'arrivent JAMAIS jusqu'à
+  // Octonet — ils s'authentifient sur leur app cliente (ex: Octocloud), qui
+  // proxie ensuite vers cet endpoint pour faire le bcrypt.compare LÀ où
+  // vit le hash. Le password hash ne quitte donc jamais Octonet, pendant
+  // que le sanitizer middleware continue à strip les hashes de toute
+  // autre route REST entity (defense-in-depth).
+  //
+  // Flow :
+  //   1. apikey-middleware équivalent : checkApiKey(X-API-Key)
+  //   2. createCredentialsVerifyHandler de @mostajs/auth :
+  //      - findUserByEmail via UserRepository sur le dialect singleton
+  //      - bcrypt.compare local
+  //      - retourne {ok, user} ou 401
+  //
+  // Scope check : 'operations:read' (c'est un lookup user). Le portal
+  // apikey l'a déjà ; les apikeys publiques limitées à read peuvent aussi
+  // l'utiliser mais seront filtrées par account-scope-middleware sur
+  // les requêtes ultérieures.
+  app.post('/api/auth/verify', async (req, reply) => {
+    const headers = req.headers as Record<string, string | undefined>;
+    const rawKey = headers['x-api-key'] || headers['X-API-Key']
+                || (req.query as any)?.apikey;
+    if (!rawKey) {
+      return reply.status(401).send({ error: 'X-API-Key header required' });
+    }
+    if (!dialect) {
+      return reply.status(503).send({ error: 'metadata DB unavailable' });
+    }
+
+    try {
+      const { checkApiKey } = await import('@mostajs/api-keys/server');
+      const apiCheck = await checkApiKey(dialect, {
+        rawKey: String(rawKey),
+        checks: [
+          { scope: 'projects',   value: 'default' },
+          { scope: 'operations', value: 'read' },
+          { scope: 'transports', value: 'rest' },
+        ],
+        ip: req.ip || undefined,
+      });
+      if (!apiCheck.ok) {
+        return reply.status(401).send({
+          error: apiCheck.message || 'invalid apikey',
+          code:  apiCheck.code || 'UNAUTHORIZED',
+        });
+      }
+
+      // apikey OK — délègue au handler @mostajs/auth. Import direct du sous-path
+      // pour éviter de pull `next/server` (auth-check.js l'importe au top-level
+      // et octonet-mcp est un Fastify server, pas Next.js).
+      const { createCredentialsVerifyHandler } = await import('@mostajs/auth/lib/credentials-verify');
+      const { UserRepository } = await import('@mostajs/rbac/server');
+      const userRepo = new UserRepository(dialect as any);
+
+      const handler = createCredentialsVerifyHandler({
+        findUserByEmail: async (email: string) => {
+          // bypass intentionnel du sanitizer — on est CÔTÉ serveur, le hash
+          // est requis pour le bcrypt.compare et ne sortira pas de ce process.
+          return userRepo.findByEmail(email);
+        },
+        defaultRole: 'user',
+      });
+
+      // Adapt Fastify req → Web Request pour le handler.
+      const url = `http://internal${req.url}`;
+      const webReq = new Request(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(req.body ?? {}),
+      });
+      const webResp = await handler(webReq);
+      const text = await webResp.text();
+      reply.status(webResp.status);
+      webResp.headers.forEach((v: string, k: string) => reply.header(k, v));
+      return reply.send(text);
+    } catch (e: any) {
+      console.error('[/api/auth/verify] internal error:', e?.message || e);
+      return reply.status(500).send({ error: 'internal error' });
+    }
+  });
+
   // 8b. Live log SSE — stream request logs to browser
   const liveLogClients: import('http').ServerResponse[] = [];
 
@@ -1181,13 +1289,36 @@ ${C.cyan}└──────────────────────�
     }
   });
 
-  app.post('/api/apply-schema', async () => {
+  app.post('/api/apply-schema', async (req) => {
     if (!dialect) return { ok: false, error: 'DB non connectee. Utilisez "Reconnecter" d abord.' };
     try {
+      // Si le client envoie des schémas dans le body (NetClient.applySchema),
+      // on les registre AVANT d'appliquer — c'est l'usage gateway-aware
+      // (Octocloud, NetClient C#/Java/…) pour bootstrapper ses entités
+      // business sans devoir uploader+restart le serveur.
+      // Différence avec /api/upload-schemas-json :
+      //   - apply-schema : register + initSchema en mémoire, PAS de persist
+      //                    fichier, PAS de restart. Idempotent pour CRUD.
+      //   - upload-schemas-json : tout pareil + persist disque + restart pour
+      //                    enregistrer les routes REST par-dessus.
+      const body = req.body as { schemas?: any[] } | undefined;
+      const incoming: any[] = Array.isArray(body?.schemas) ? body!.schemas : [];
+      let registered = 0;
+      if (incoming.length > 0) {
+        registerSchemas(incoming);
+        registered = incoming.length;
+      }
       const currentSchemas = getAllSchemas();
       if (currentSchemas.length === 0) return { ok: false, error: 'Aucun schema charge. Scannez ou uploadez les schemas d abord.' };
       await dialect.initSchema(currentSchemas);
-      return { ok: true, message: currentSchemas.length + ' schemas appliques (tables creees/mises a jour)', tables: currentSchemas.map(s => s.collection) };
+      const applied = incoming.length > 0 ? incoming.map(s => s.collection || s.name) : currentSchemas.map(s => s.collection);
+      return {
+        ok: true,
+        message: currentSchemas.length + ' schemas appliques (tables creees/mises a jour)',
+        registered,
+        applied,
+        tables: currentSchemas.map(s => s.collection),
+      };
     } catch (e: unknown) {
       return { ok: false, error: e instanceof Error ? e.message : 'Erreur' };
     }
