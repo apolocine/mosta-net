@@ -13,7 +13,11 @@ import type { EntitySchema, OrmRequest, OrmResponse, IDialect } from '@mostajs/o
 // Per-project dialects (default + N user projects) are still managed by
 // ProjectManager via openIsolatedDialect — they are explicit isolation, not
 // part of the chain.
-import { getDialect as switcherGetDialect, bootstrapSystemDialect } from '@mostajs/data-plug';
+import {
+  getDialect as switcherGetDialect,
+  getSystemDialect as switcherGetSystemDialect,
+  bootstrapSystemDialect,
+} from '@mostajs/data-plug';
 import { ProjectManager } from '@mostajs/mproject';
 import type { ProjectConfig } from '@mostajs/mproject';
 import { loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip } from './lib/schema-loader.js';
@@ -111,8 +115,10 @@ export async function startServer(): Promise<NetServer> {
   // 2bis. Bootstrap system dialect — DOIT venir AVANT toute instanciation
   // de middleware/handler système (apikey-middleware, rbac, audit). Tolérant
   // aux erreurs de config pour ne pas bloquer le démarrage du serveur.
+  let systemDialect: IDialect | null = null;
   try {
     await bootstrapSystemDialect();
+    systemDialect = (await switcherGetSystemDialect()) as unknown as IDialect;
   } catch (e: unknown) {
     const sysErr = e instanceof Error ? e.message : String(e);
     console.log(`\n  \x1b[33m⚠ System dialect non connecte:\x1b[0m ${sysErr}`);
@@ -157,14 +163,16 @@ export async function startServer(): Promise<NetServer> {
   // 4b-bis. Bootstrap RBAC + tenancy (User, Role, Permission, Account, ApiKey)
   // Idempotent — safe to call on every boot. Emits the public demo apikey
   // in clear ONCE (only when first run). Failure is non-fatal.
-  // RBAC tables live in the orm singleton (= the meta DB). Octocloud reads
-  // the same data via NetClient proxy → REST → Octonet → singleton. One
-  // source of truth. Zero schema drift.
-  if (dialect) {
+  // RBAC tables live in the SYSTEM dialect (apikeys, users, roles, permissions).
+  // Octocloud reads the same data via NetClient proxy → REST → Octonet → system
+  // dialect. One source of truth. Zero schema drift.
+  // Guard sur systemDialect (pas métier) — RBAC peut être bootstrappé même si la
+  // connexion métier est down (système isolé via MOSTA_SYSTEM_URI).
+  if (systemDialect) {
     try {
       const { bootstrapRbac } = await import('./auth/octonet-rbac-bootstrap.js');
       const { getEnvBool } = await import('@mostajs/config');
-      const r = await bootstrapRbac(dialect, {
+      const r = await bootstrapRbac(systemDialect, {
         verbose: getEnvBool('OCTONET_BOOTSTRAP_VERBOSE', false),
       });
       if (r.ok) {
@@ -178,17 +186,17 @@ export async function startServer(): Promise<NetServer> {
   }
 
   // 4b-ter. Register canonical scopes (projects/operations/transports) for the
-  // apikey scope registry. Scopes live in dialect (alongside api_keys).
-  if (dialect) {
+  // apikey scope registry. Scopes live in the SYSTEM dialect (alongside api_keys).
+  if (systemDialect) {
     try {
       const { registerScope, ScopeSchema, ScopeValueSchema } = await import('@mostajs/api-keys/server');
-      // Ensure Scope tables exist
+      // Ensure Scope tables exist (registered globally, then init on system dialect)
       registerSchemas([ScopeSchema as any, ScopeValueSchema as any]);
-      if (typeof (dialect as any).initSchema === 'function') {
-        await (dialect as any).initSchema([ScopeSchema, ScopeValueSchema]);
+      if (typeof (systemDialect as any).initSchema === 'function') {
+        await (systemDialect as any).initSchema([ScopeSchema, ScopeValueSchema]);
       }
       // operations — static, low-cardinality
-      await registerScope(dialect, {
+      await registerScope(systemDialect, {
         name: 'operations', label: 'CRUD operations',
         description: 'Coarse CRUD families enforced on entity routes',
         cardinality: 'low', valuesSource: 'static',
@@ -200,7 +208,7 @@ export async function startServer(): Promise<NetServer> {
         ],
       });
       // transports — static, low-cardinality
-      await registerScope(dialect, {
+      await registerScope(systemDialect, {
         name: 'transports', label: 'Network transports',
         description: 'Wire protocols served by Octonet',
         cardinality: 'low', valuesSource: 'static',
@@ -222,7 +230,7 @@ export async function startServer(): Promise<NetServer> {
       // projects — dynamic, high-cardinality, sourced from the Project entity
       // (note: in fallback projects-tree.json mode this list will resolve empty
       //  and the host should fall back to a custom resolver if needed).
-      await registerScope(dialect, {
+      await registerScope(systemDialect, {
         name: 'projects', label: 'Projects',
         description: 'Project slugs the key can access',
         cardinality: 'high', valuesSource: 'dynamic',
@@ -454,12 +462,12 @@ ${C.cyan}└──────────────────────�
       const { getEnvBool } = await import('@mostajs/config');
       const globalMiddlewares = [
         createSanitizerMiddleware(),
-        createApiKeyMiddleware(() => dialect, { openMode: getEnvBool('OCTONET_OPEN_MODE', false) }),
+        createApiKeyMiddleware(() => systemDialect, { openMode: getEnvBool('OCTONET_OPEN_MODE', false) }),
         // Multi-tenant row-level scoping (B3 modèle β) — filtre les entités
         // account-scoped (ApiKey, Project, Subscription, Invoice, UsageLog,
         // Account) selon l'apikey owner. Pour une apikey 'portal', expansion
         // en {portal, ...children} via Account.parent FK.
-        createAccountScopeMiddleware(() => dialect),
+        createAccountScopeMiddleware(() => systemDialect),
       ];
       protectedOrmHandler = composeMiddleware(globalMiddlewares, ormHandler);
       console.log(`  ✓ Protected ormHandler ready (sanitizer + apikey + account-scope)`);
@@ -505,7 +513,7 @@ ${C.cyan}└──────────────────────�
       const { createApiKeyMiddleware } = await import('./auth/apikey-middleware.js');
       const { getEnvBool } = await import('@mostajs/config');
       transport.use(createApiKeyMiddleware(
-        () => dialect,
+        () => systemDialect,
         { openMode: getEnvBool('OCTONET_OPEN_MODE', false) },
       ));
       console.log(`  ✓ ApiKey middleware on ${transport.name}`);
@@ -517,7 +525,7 @@ ${C.cyan}└──────────────────────�
     // S'applique APRÈS l'apikey middleware pour avoir ctx.accountId disponible.
     try {
       const { createAccountScopeMiddleware } = await import('./auth/account-scope-middleware.js');
-      transport.use(createAccountScopeMiddleware(() => dialect));
+      transport.use(createAccountScopeMiddleware(() => systemDialect));
       console.log(`  ✓ Account-scope middleware on ${transport.name}`);
     } catch (e: any) {
       console.warn(`  ⚠ Account-scope middleware failed on ${transport.name}: ${e?.message || e}`);
@@ -551,7 +559,7 @@ ${C.cyan}└──────────────────────�
       // SSE endpoint: GET /events — auth-guarded
       app.get(ssePath, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
-        const auth = await authGuard(dialect, req, { transport: 'sse', operation: 'read' });
+        const auth = await authGuard(systemDialect, req, { transport: 'sse', operation: 'read' });
         if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         reply.hijack();
         sseTransport.addClient(reply.raw);
@@ -582,7 +590,7 @@ ${C.cyan}└──────────────────────�
         // Auth check on every GraphQL request via the context hook.
         // Throwing inside context aborts the request before resolvers run.
         context: async (req: any, reply: any) => {
-          const auth = await authGuard(dialect, req, { transport: 'graphql' });
+          const auth = await authGuard(systemDialect, req, { transport: 'graphql' });
           if (!auth.ok) {
             reply.code(auth.status!);
             const err = new Error(auth.body?.error?.message || 'unauthorized');
@@ -602,7 +610,7 @@ ${C.cyan}└──────────────────────�
 
       app.post(rpcPath, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
-        const auth = await authGuard(dialect, req, { transport: 'jsonrpc' });
+        const auth = await authGuard(systemDialect, req, { transport: 'jsonrpc' });
         if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const result = await rpcTransport.handleBody(req.body);
         return result;
@@ -632,7 +640,7 @@ ${C.cyan}└──────────────────────�
       // public-default key's read-only scope still applies, so writes stay blocked.
       app.all(mcpPath, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
-        const auth = await authGuard(dialect, req, {
+        const auth = await authGuard(systemDialect, req, {
           transport: 'mcp',
           fallbackPublicLabel: 'public-default',
         });
@@ -652,7 +660,7 @@ ${C.cyan}└──────────────────────�
       app.all(`${trpcPath}/*`, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
         const op = req.method === 'GET' ? 'read' : 'write';
-        const auth = await authGuard(dialect, req, { transport: 'trpc', operation: op as any });
+        const auth = await authGuard(systemDialect, req, { transport: 'trpc', operation: op as any });
         if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const result = await trpcTransport.handleRequest(req.url, req.body as any);
         return result;
@@ -681,7 +689,7 @@ ${C.cyan}└──────────────────────�
       app.all(`${odataPath}/*`, async (req, reply) => {
         const { authGuard } = await import('./auth/route-guard.js');
         const op = req.method === 'GET' ? 'read' : 'write';
-        const auth = await authGuard(dialect, req, { transport: 'odata', operation: op as any });
+        const auth = await authGuard(systemDialect, req, { transport: 'odata', operation: op as any });
         if (!auth.ok) { reply.code(auth.status!); return auth.body; }
         const q = req.query as Record<string, string>;
         const result = await odataTransport.handleRequest(req.method, req.url, q, req.body);
@@ -778,13 +786,13 @@ ${C.cyan}└──────────────────────�
     if (!rawKey) {
       return reply.status(401).send({ error: 'X-API-Key header required' });
     }
-    if (!dialect) {
+    if (!systemDialect) {
       return reply.status(503).send({ error: 'metadata DB unavailable' });
     }
 
     try {
       const { checkApiKey } = await import('@mostajs/api-keys/server');
-      const apiCheck = await checkApiKey(dialect, {
+      const apiCheck = await checkApiKey(systemDialect, {
         rawKey: String(rawKey),
         checks: [
           { scope: 'projects',   value: 'default' },
@@ -805,7 +813,7 @@ ${C.cyan}└──────────────────────�
       // et octonet-mcp est un Fastify server, pas Next.js).
       const { createCredentialsVerifyHandler } = await import('@mostajs/auth/lib/credentials-verify');
       const { UserRepository } = await import('@mostajs/rbac/server');
-      const userRepo = new UserRepository(dialect as any);
+      const userRepo = new UserRepository(systemDialect as any);
 
       const handler = createCredentialsVerifyHandler({
         findUserByEmail: async (email: string) => {
@@ -1726,8 +1734,8 @@ ${C.cyan}└──────────────────────�
       const { registerTryRoutes, startTrialCleanupJob } = await import('./routes/try.js');
       const { registerTryPage } = await import('./routes/try-page.js');
       registerTryPage(app);
-      registerTryRoutes(app, { dialect: dialect, pm: pm as any });
-      startTrialCleanupJob({ dialect: dialect, pm: pm as any });
+      registerTryRoutes(app, { dialect: systemDialect, pm: pm as any });
+      startTrialCleanupJob({ dialect: systemDialect, pm: pm as any });
       console.log(`  ✓ T1 sandbox endpoint /try ready (rate-limited 10/h/IP, TTL 7d)`);
     } catch (e: any) {
       console.warn(`  ⚠ /try endpoint unavailable: ${e?.message || e}`);

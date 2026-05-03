@@ -1,8 +1,37 @@
 # Changelog — @mostajs/net
 
-## 2.7.5 (2026-05-03, unreleased) — Bootstrap system dialect au démarrage (data-plug v1.2.2+)
+## 2.7.5 (2026-05-04, unreleased) — Chantier « system dialect séparé du singleton métier » (étapes 2 + 4)
 
-Étape 2 du chantier **« system dialect séparé du singleton métier »** — câble `bootstrapSystemDialect()` dans le bootstrap d'Octonet-mcp, juste après la connexion du singleton métier et **avant** toute instanciation de middleware/handler système (apikey-middleware, rbac, audit).
+Cette release groupe les **étapes 2 et 4** du chantier *« system dialect séparé »* — bootstrap système au démarrage **et** bascule de tous les consumers système (RBAC, apikey-middleware, account-scope, auth guards, sandbox /try) vers `getSystemDialect()` au lieu du singleton métier mutable.
+
+Combinée à `@mostajs/data-plug v1.2.2-1.2.4` *(façade ORM + system dialect API)* et aux refactors v0.x.y des modules consumers `api-keys` / `payment` / `project-life` / `subscriptions-plan` *(WeakMap repos + migration imports orm → data-plug)*, elle clôt le bug **« apikeys introuvables après /api/change-dialect »** observé en prod.
+
+---
+
+### Étape 4 — Consumers système basculent sur `getSystemDialect()`
+
+**18 sites système** dans `src/server.ts` passent désormais `systemDialect` *(stable)* au lieu de `dialect` *(métier mutable)* :
+
+| Bloc | Sites | Caller |
+|------|-------|--------|
+| RBAC bootstrap | 1 | `bootstrapRbac(systemDialect, …)` |
+| Scopes register | 4 | `registerScope(systemDialect, …)` × 3 + `systemDialect.initSchema(scopeTables)` |
+| Middlewares globaux | 2 | `createApiKeyMiddleware(() => systemDialect, …)` + `createAccountScopeMiddleware(() => systemDialect)` |
+| Middlewares per-transport | 2 | idem appliqués sur chaque `transport.use(...)` |
+| Auth guards transports | 6 | `authGuard(systemDialect, …)` × 6 *(SSE, GraphQL, JSON-RPC, gRPC, tRPC, OData)* |
+| Custom `/api/auth/verify` | 2 | `checkApiKey(systemDialect, …)` + `new UserRepository(systemDialect)` |
+| Sandbox `/try` | 2 | `registerTryRoutes({ dialect: systemDialect, … })` + `startTrialCleanupJob({ dialect: systemDialect, … })` |
+
+Le **dialect métier** *(`dialect`)* reste utilisé légitimement pour :
+- Bootstrap initial du singleton métier *(L98)* + `pm.setDefault('default', dialect, …)` *(L126, L240)*
+- Routes admin `/api/reconnect`, `/api/change-dialect`, `/api/reload-config`, `/api/test-connection`, `/api/truncate-tables`, `/api/drop-tables` — toutes opérations explicitement métier
+- `EntityService` qui sert les entités userland *(opérations CRUD via les transports protégés)*
+
+Les guards `if (dialect)` autour des blocs RBAC + scopes ont été remplacés par `if (systemDialect)` — sémantiquement plus correct *(le bootstrap système peut réussir même si la connexion métier est down, en mode multi-base)*.
+
+### Étape 2 — Bootstrap system dialect au démarrage (rappel)
+
+Étape 2 originelle du chantier — câble `bootstrapSystemDialect()` dans le bootstrap d'Octonet-mcp, juste après la connexion du singleton métier et **avant** toute instanciation de middleware/handler système (apikey-middleware, rbac, audit).
 
 ### Motivation
 

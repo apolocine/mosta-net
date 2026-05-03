@@ -375,6 +375,17 @@ DB_SCHEMA_STRATEGY=update                          # 'update' (recommandé prod)
 DB_SHOW_SQL=false
 ```
 
+### System dialect (recommandé prod, optionnel) — v2.7.5+
+
+Sépare la base **système** *(apikeys, RBAC users, audit, plans, payments, project-life metadata)* du dialect **métier mutable**. Sans ces variables, alias transparent vers le singleton métier *(rétro-compat mono-base)*.
+
+```bash
+MOSTA_SYSTEM_DIALECT=postgres                       # any of 13 dialects
+MOSTA_SYSTEM_URI=postgresql://user:pass@localhost:5432/octonet_system
+```
+
+Voir section [System dialect](#system-dialect-séparé-du-singleton-métier) ci-dessous pour la motivation et les how-to.
+
 ### Server
 
 ```bash
@@ -576,6 +587,133 @@ PORTAL_DB_URI=postgresql://user:pass@localhost:5432/octonet_cloud     # legacy o
 | `@mostajs/cloud-middleware` | quota / abonnement (optionnel — actif si Octocloud connecté) |
 | `@mostajs/replicator` | CQRS multi-replica (optionnel) |
 | `@mostajs/project-life` | persistence schemas Project (optionnel — si stockage SGBD vs JSON) |
+
+---
+
+## System dialect (séparé du singleton métier)
+
+> **Disponible depuis v2.7.5** — résout le bug *« apikeys introuvables après `/api/change-dialect` »* observé en prod.
+
+### Pourquoi deux dialects distincts ?
+
+Octonet expose des routes admin qui mutent la connexion DB au runtime *(`/api/change-dialect`, `/api/reload-config`, `/api/reconnect`)* — légitime côté **métier** *(les entités userland du projet courant peuvent migrer postgres → sqlite → mongodb selon les besoins de l'admin)*.
+
+Mais les modules **système** *(apikeys, RBAC users, audit, plans de souscription, payments, project-life metadata)* doivent vivre dans une base **stable** qui ne suit pas ces mutations. Sinon : un changement de dialect métier rend les apikeys introuvables, l'admin se trouve verrouillé hors de l'IHM.
+
+| Rôle | Variable env | Mutable au runtime ? | Lu par |
+|------|--------------|----------------------|--------|
+| **Métier** *(entités userland)* | `DB_DIALECT` + `SGBD_URI` | **Oui** *(IHM admin)* | `EntityService`, transports, routes data |
+| **Système** *(infra Octonet)* | `MOSTA_SYSTEM_DIALECT` + `MOSTA_SYSTEM_URI` | **Non** *(stable)* | RBAC, apikey-middleware, account-scope, auth guards, sandbox /try |
+
+### Configuration recommandée *(prod multi-base)*
+
+```bash
+# Métier — peut bouger via /api/change-dialect
+DB_DIALECT=postgres
+SGBD_URI=postgresql://hmd:***@127.0.0.1:5432/octonet_business
+
+# Système — stable, jamais touché par les routes admin
+MOSTA_SYSTEM_DIALECT=postgres
+MOSTA_SYSTEM_URI=postgresql://hmd:***@127.0.0.1:5432/octonet_system
+```
+
+### Configuration mono-base *(dev / déploiement simple)*
+
+Laisser `MOSTA_SYSTEM_*` vides → alias automatique vers le singleton métier *(rétro-compat 100 %, comportement identique au pré-v2.7.5)*.
+
+### How-to
+
+#### 1. Migrer un déploiement existant vers le mode multi-base
+
+```bash
+# 1. Sauvegarder la base actuelle
+pg_dump octonet_business > backup-pre-split.sql
+
+# 2. Créer la base système (vide — RBAC seed re-exécute au boot)
+createdb octonet_system
+
+# 3. Ajouter MOSTA_SYSTEM_* dans .env
+echo 'MOSTA_SYSTEM_DIALECT=postgres' >> .env.local
+echo 'MOSTA_SYSTEM_URI=postgresql://hmd:***@127.0.0.1:5432/octonet_system' >> .env.local
+
+# 4. Restart Octonet — le bootstrap RBAC + scopes seed sur octonet_system
+pm2 restart octonet-mcp
+
+# 5. Restaurer les apikeys et RBAC users de l'ancienne base
+#    (à scripter selon convention métier — typiquement export/import des
+#    tables api_keys, users, roles, permissions, scopes, scope_values)
+```
+
+#### 2. Vérifier que le système est bien isolé du métier
+
+```bash
+# Avant /api/change-dialect : apikey doit fonctionner
+curl -H "X-API-Key: sk_live_…" http://localhost:4488/api/auth/verify
+# → 200 OK
+
+# Bouger le dialect métier vers SQLite
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"dialect":"sqlite","uri":":memory:","connect":true}' \
+  http://localhost:4488/api/change-dialect
+# → "Dialecte changé et connecté : sqlite"
+
+# Re-tester l'apikey — DOIT toujours fonctionner (système intact)
+curl -H "X-API-Key: sk_live_…" http://localhost:4488/api/auth/verify
+# → 200 OK (bug résolu en v2.7.5)
+```
+
+Avant v2.7.5, le 2ᵉ curl retournait `503 metadata DB unavailable` ou `401 PostgreSQL not connected. Call connect() first.`
+
+#### 3. Lire le system dialect depuis du code applicatif
+
+```ts
+import { getSystemDialect } from '@mostajs/data-plug'
+
+const sysDialect = await getSystemDialect()
+// Utiliser comme un dialect normal pour requêter les tables système
+// (apikeys, users, roles, audit_log, plans, etc.)
+```
+
+#### 4. Inspecter le bootstrap au démarrage
+
+Au boot d'`octonet-mcp`, deux logs apparaissent :
+
+```
+✓ DB connectée: postgres                            ← métier
+✓ System dialect: postgres (octonet_system)         ← système (si MOSTA_SYSTEM_* défini)
+✓ RBAC ready — admin=… trial=… public=…             ← seed côté système
+✓ ApiKey middleware on REST/SSE/GraphQL/...         ← câblé sur système
+```
+
+### Sites système dans `src/server.ts` *(pour référence)*
+
+18 callers tirent désormais leur dialect via `getSystemDialect()` au lieu du singleton métier :
+
+| Bloc | Sites | Caller |
+|------|-------|--------|
+| RBAC bootstrap | 1 | `bootstrapRbac(systemDialect, …)` |
+| Scopes register | 4 | `registerScope(systemDialect, …)` × 3 + `systemDialect.initSchema(scopeTables)` |
+| Middlewares globaux | 2 | `createApiKeyMiddleware(() => systemDialect, …)` + `createAccountScopeMiddleware(() => systemDialect)` |
+| Middlewares per-transport | 2 | idem appliqués sur chaque `transport.use(…)` |
+| Auth guards transports | 6 | `authGuard(systemDialect, …)` × 6 *(SSE, GraphQL, JSON-RPC, gRPC, tRPC, OData)* |
+| Custom `/api/auth/verify` | 2 | `checkApiKey(systemDialect, …)` + `new UserRepository(systemDialect)` |
+| Sandbox `/try` | 2 | `registerTryRoutes({ dialect: systemDialect, … })` + `startTrialCleanupJob({ dialect: systemDialect, … })` |
+
+Le **dialect métier** *(`dialect`)* reste utilisé légitimement pour :
+- Bootstrap initial du singleton métier *(`L98`)* + `pm.setDefault('default', dialect, …)` *(`L126`, `L240`)*
+- Routes admin `/api/reconnect`, `/api/change-dialect`, `/api/reload-config`, `/api/test-connection`, `/api/truncate-tables`, `/api/drop-tables` — toutes opérations explicitement métier
+- `EntityService` qui sert les entités userland *(opérations CRUD via les transports protégés)*
+
+### Étapes du chantier *(historique)*
+
+| Étape | Repo | Livré |
+|-------|------|-------|
+| 1 | `@mostajs/data-plug` v1.2.2-1.2.4 *(API `getSystemDialect` + façade ORM)* | npm |
+| 2 | `@mostajs/net` v2.7.5 *(`bootstrapSystemDialect` au démarrage)* | git |
+| 3 | `@mostajs/api-keys` 0.2.3, `@mostajs/payment` 0.4.1, `@mostajs/project-life` 0.1.3, `@mostajs/subscriptions-plan` 0.3.5 *(WeakMap repos + façade)* | npm |
+| 4 | `@mostajs/net` v2.7.5 *(consumers basculent sur `getSystemDialect()` — 18 sites)* | git |
+| 5 | Tests d'intégration scénario `/api/change-dialect` postgres → sqlite | ⏳ |
+| 6 | Déploiement amia + smoke test `MOSTA_SYSTEM_URI` | ⏳ |
 
 ---
 
