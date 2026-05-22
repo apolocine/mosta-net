@@ -116,7 +116,9 @@
   "files": [
     "dist",
     "README.md",
-    "server.json"
+    "server.json",
+    "llms.txt",
+    "CHANGELOG.md"
   ],
   "keywords": [
     "orm",

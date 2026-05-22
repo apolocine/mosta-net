@@ -1,0 +1,87 @@
+# @mostajs/net — fiche LLM
+> Serveur de transport multi-protocole pour @mostajs/orm : expose un schéma d'entités via REST, GraphQL, WebSocket, SSE, JSON-RPC, MCP (+ gRPC, tRPC, OData, Arrow Flight, NATS).
+
+- Version: 2.7.5 · Licence: AGPL-3.0-or-later · Auteur: Dr Hamid MADANI <drmdh@msn.com>
+- Chemin: mostajs/mosta-net · Statut audit: complet (dist/)
+- Nom de marque: « Octonet ». Repo: github.com/apolocine/mosta-net
+
+## RÔLE
+Couche transport (« second lobe » de la trilogie orm → net → NetClients) du socle @mostajs.
+Prend un schéma EntitySchema de @mostajs/orm et le publie simultanément sur N protocoles
+réseau, avec auth multi-tenant (API keys), routage multi-projet et middlewares chaînables.
+Fournit un serveur Fastify clé en main (startServer / CLI mostajs-net) plus des classes de
+transport unitaires réutilisables. Inclut un binaire MCP (octonet-mcp) pour Claude Desktop.
+
+## INSTALLATION
+npm i @mostajs/net
+
+## EXPORTS
+- Transports (classes): RestTransport, SSETransport, GraphQLTransport, WebSocketTransport, JsonRpcTransport, McpTransport
+- Coeur transport: getTransport, getActiveTransports, stopAllTransports, composeMiddleware, loggingMiddleware
+- Config: loadNetConfig, getEnabledTransports, TRANSPORT_NAMES
+- Serveur: startServer, createSandboxServer (default de mcp-cli)
+- Auth/API keys: readApiKeys, writeApiKeys, generateApiKey, hashApiKey, createSubscription, revokeSubscription, validateApiKey, checkPermission, createApiKeyMiddleware, createSanitizerMiddleware
+- Schémas: loadSchemasFromJson, scanSchemaDirs, generateSchemasJson, getSchemasConfig, parseSchemasFromZip
+- Types: ITransport, TransportConfig, TransportInfo, TransportContext, TransportMiddleware, NetServerConfig, TransportName, NetServer, Subscription, ApiKeysFile
+
+## EXPORTS PAR SOUS-CHEMIN
+- @mostajs/net/client : NetClient, createNetDialectProxy (ré-export de @mostajs/net-client-js) ; types NetClientConfig, QueryOptions, CompareSchemaResult
+- @mostajs/net/middleware/cloud-hook : cloudHook (singleton — setMiddleware/removeMiddleware/isEnabled/process/getMiddleware), type CloudMiddlewareFn
+- @mostajs/net/middleware/transport-filter : transportFilter (singleton — autorise/restreint des transports par projet)
+- @mostajs/net/middleware/admin-auth : createAdminAuth(config), interface AdminAuthConfig (Basic Auth + API key)
+- @mostajs/net/middleware/project-metrics : projectMetrics (singleton — recordRequest, getMetrics, getSummary…), interface ProjectMetrics
+
+## API — SIGNATURES
+- startServer(): Promise<NetServer>  // lit .env.local MOSTA_NET_*, connecte l'ORM, démarre les transports activés
+- loadNetConfig(): NetServerConfig
+- getEnabledTransports(config): TransportName[]
+- getTransport(name: TransportName, config: TransportConfig): Promise<ITransport | null>
+- getActiveTransports(): ITransport[] ; stopAllTransports(): Promise<void>
+- composeMiddleware(middlewares: TransportMiddleware[], handler): (req, ctx) => Promise<OrmResponse>
+- generateApiKey(mode?: 'live'|'test'): string  // préfixe msk_live_ / msk_test_
+- createSubscription(name, permissions?, mode?): { subscription, clearKey }  // clearKey affiché une seule fois
+- validateApiKey(key): Subscription | null
+- checkPermission(sub, dialect, transport, op: 'r'|'c'|'u'|'d'): boolean
+
+## TYPES CLÉS
+- TRANSPORT_NAMES = ['rest','grpc','graphql','ws','sse','trpc','mcp','odata','arrow','jsonrpc','nats']
+- ITransport { name; start(config); stop(); registerEntity(schema); use(mw); getInfo(): TransportInfo }
+- TransportConfig { enabled: boolean; port?: number; path?: string; options?: Record<string,unknown> }
+- TransportContext { transport; apiKey?; subscription?; permissions?; projectName?; meta? }
+- TransportMiddleware = (req: OrmRequest, ctx: TransportContext, next) => Promise<OrmResponse>
+- NetServerConfig { port: number; transports: Record<string, TransportConfig> }
+- NetServer { app: FastifyInstance; entityService; pm: ProjectManager; rm; stop() }
+- Subscription { name; key; hash; created; status: 'active'|'revoked'; permissions: Record<string,Record<string,string>> }
+
+## PATTERN
+```ts
+import { startServer } from '@mostajs/net';
+const net = await startServer();   // serveur Fastify multi-protocole prêt
+// arrêt propre :
+await net.stop();
+```
+Client polyglotte :
+```ts
+import { NetClient } from '@mostajs/net/client';
+const client = new NetClient({ baseUrl: 'http://localhost:4488', apiKey: 'msk_live_…' });
+```
+CLI : `npx mostajs-net serve`  ·  MCP : binaire `octonet-mcp`.
+
+## DÉPEND DE
+- Dépendances runtime @mostajs: @mostajs/data-plug, @mostajs/net-client-js
+- Peers @mostajs (tous optionnels sauf @mostajs/mproject et @mostajs/orm): @mostajs/orm, @mostajs/mproject, @mostajs/auth, @mostajs/api-keys, @mostajs/rbac, @mostajs/config, @mostajs/cloud-middleware, @mostajs/project-life, @mostajs/replicator
+- Externes: fastify, @fastify/cors, graphql, mercurius, ws, nats, pg, mongoose, @modelcontextprotocol/sdk
+
+## PIÈGES
+- Configuration par env uniquement : MOSTA_NET_{TRANSPORT}_ENABLED / _PORT / _PATH ; l'ORM via MOSTA_ORM_* + DB_DIALECT + SGBD_URI. startServer() lit .env.local, aucun argument de config.
+- getTransport() renvoie null si le transport n'est pas activé en config — toujours tester le retour.
+- createSubscription retourne clearKey une seule fois ; seul le hash est persisté dans .mosta/apikeys.json.
+- cloudHook / transportFilter / projectMetrics sont des singletons à état mutable global, pas des classes à instancier.
+- Le `projectName` du TransportContext est le nom unique du projet, pas un ID numérique.
+- v2.7.5 marquée « unreleased » dans le CHANGELOG : chantier « system dialect séparé du singleton métier » — les consumers système utilisent getSystemDialect() (stable) et non le dialect métier mutable.
+
+## RÉFÉRENCES
+- README.md (présentation Octonet, 11 transports, onboarding 3 tiers, déploiement)
+- CHANGELOG.md (v2.7.5)
+- MCP.md, smithery.yaml, server.json (intégration MCP)
+- docs/
