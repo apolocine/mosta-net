@@ -16,6 +16,17 @@
 
 ---
 
+<p align="center">
+  <img src="assets/architecture-orm-net-netclient.png" width="900" alt="Octonet stack as electrical sockets: @mostajs/orm plugs into 13 databases, @mostajs/net (Octonet) re-exposes them over 11 transports, Data-Plug bridges them, and NetClient fans out to 18 language clients consumed by any external app."/>
+</p>
+
+> **The socket board.** `@mostajs/orm` connects to **13 databases**; **Octonet**
+> (`@mostajs/net`) re-exposes the same entities over **11 transports** (REST,
+> WebSocket, gRPC, MQTT, AMQP…); **NetClient** then fans out to **18 language
+> clients** — so any external app plugs into your data, in any runtime.
+
+---
+
 ## Table of Contents
 
 1. [What is Octonet](#what-is-octonet)
