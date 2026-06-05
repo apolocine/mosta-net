@@ -18,10 +18,27 @@ const DEFAULT_SENSITIVE_FIELDS = [
   'apiKeyHash', 'secret', 'privateKey',
 ];
 
+/** Préserve les types qui sont des `object` mais NON-plain — un strip naïf
+ *  par `Object.keys` les écrase en `{}` (cas notable : `Date`, `RegExp`,
+ *  `Buffer`, `ObjectId` BSON, `Map`/`Set`). Les laisser passer tels quels
+ *  donne la sérialisation JSON correcte côté Fastify (Date.toJSON → ISO, etc.). */
+function isNonPlainObject(value: any): boolean {
+  if (value instanceof Date) return true;
+  if (value instanceof RegExp) return true;
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer?.(value)) return true;
+  if (value instanceof Map || value instanceof Set) return true;
+  // BSON ObjectId (Mongo) — duck-type sans require BSON.
+  if (value && typeof value === 'object'
+      && typeof (value as any)._bsontype === 'string'
+      && (value as any)._bsontype === 'ObjectId') return true;
+  return false;
+}
+
 function stripFields(value: any, fields: Set<string>): any {
   if (value == null) return value;
   if (Array.isArray(value)) return value.map((v) => stripFields(v, fields));
   if (typeof value === 'object') {
+    if (isNonPlainObject(value)) return value;
     const out: Record<string, any> = {};
     for (const k of Object.keys(value)) {
       if (fields.has(k)) continue;

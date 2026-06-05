@@ -1,5 +1,45 @@
 # Changelog — @mostajs/net
 
+## 2.7.7 (2026-06-05) — peerDependency `@mostajs/api-keys` élargie à `^0.1.2 || ^0.2.0`
+
+**Changé** : la peerDependency `@mostajs/api-keys` passe de `^0.1.2` à **`^0.1.2 || ^0.2.0`**.
+net était déjà **dev-buildé contre `@mostajs/api-keys@^0.2.0`** (devDependency) et son code (`/try`,
+apikey-middleware) est compatible 0.2.x ; seul le **peer** restait bloqué en `^0.1.x`, provoquant un
+conflit `ERESOLVE` chez les consommateurs installant `@mostajs/api-keys@^0.2.x` aux côtés de net
+(ex. un serveur de positions geo avec auth + api-keys). Les consommateurs en 0.1.x restent supportés.
+
+*(Resynchronise aussi git ↔ npm : le source de 2.7.6 — bump de version, sanitizer-middleware,
+octonet-rbac-bootstrap — était publié mais non commité ; il est inclus dans ce commit.)*
+
+## 2.7.6 (2026-05-26) — Fix : sérialisation HTTP des champs `type:"date"` (Date / RegExp / Buffer / ObjectId / Map / Set)
+
+**Bug corrigé** : tout champ d'`EntitySchema` déclaré `{ type:"date" }`, stocké en BSON Date côté MongoDB et correctement hydraté en `Date` JS par `@mostajs/orm` (`instanceof Date === true` au sortir de `EntityService.execute`), apparaissait `{}` dans la réponse HTTP REST (cas notables : `createdAt`, `updatedAt`, et tout `timestamp` métier). Les consommateurs qui filtrent par date (`v.timestamp.getTime()`, agrégation mensuelle, propagation d'IC) plantaient avec `TypeError: e.getTime is not a function`.
+
+**Cause racine** : `src/auth/sanitizer-middleware.ts::stripFields()` reconstruisait l'objet de réponse en parcourant `Object.keys(value)` — or `Object.keys(new Date())` est `[]` (les méthodes de `Date` vivent sur le prototype, pas en propriétés énumérables propres). Conséquence : tout `Date`, et plus généralement tout objet « non-plain » (`RegExp`, `Buffer`, BSON `ObjectId`, `Map`, `Set`), était écrasé en `{}` au passage du sanitizer.
+
+**Fix** : ajout d'un garde `isNonPlainObject(value)` dans `stripFields()`. Si vrai, on renvoie la valeur **inchangée** ; Fastify peut alors la sérialiser correctement en aval (`Date.toJSON()` → ISO 8601, `Buffer` → string base64 le cas échéant, etc.).
+
+```ts
+function isNonPlainObject(value: any): boolean {
+  if (value instanceof Date) return true;
+  if (value instanceof RegExp) return true;
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer?.(value)) return true;
+  if (value instanceof Map || value instanceof Set) return true;
+  if (value && typeof value === 'object'
+      && typeof value._bsontype === 'string'
+      && value._bsontype === 'ObjectId') return true;
+  return false;
+}
+```
+
+**Compatibilité** : aucun changement d'API publique. Les consommateurs qui faisaient `JSON.parse(JSON.stringify(resp))` côté client retrouvent automatiquement des strings ISO correctement parsables. Les routes qui rendaient `{}` à tort renvoient désormais l'ISO attendue.
+
+**Diagnostic** : `test-scripts/diagnose-date-serialization.mjs` (générique — `--entity=` `--field=` `--port=` `--uri=`) compare la lecture d'un champ `type:"date"` via `EntityService.execute` *(chemin ORM pur)* et via `fetch` HTTP loopback du serveur — verdict immédiat sur la couche fautive. Réutilisable sur tout projet qui expose un `schemas.json` et un serveur `@mostajs/net` local.
+
+**Origine de la régression** : un fix antérieur existait en source mais le `package.json` n'avait pas été bumpé — le binaire `dist/auth/sanitizer-middleware.js` publié sur npm pour `2.7.5` ne contenait pas la garde, alors que le source local `mostajs/mosta-net/` l'avait déjà. Comparer MD5 (`md5sum node_modules/.../dist/auth/sanitizer-middleware.js` vs source local) est désormais la procédure recommandée pour détecter ce genre d'écart « même version, binaires différents ».
+
+---
+
 ## 2.7.5 (2026-05-04, unreleased) — Chantier « system dialect séparé du singleton métier » (étapes 2 + 4)
 
 Cette release groupe les **étapes 2 et 4** du chantier *« system dialect séparé »* — bootstrap système au démarrage **et** bascule de tous les consumers système (RBAC, apikey-middleware, account-scope, auth guards, sandbox /try) vers `getSystemDialect()` au lieu du singleton métier mutable.

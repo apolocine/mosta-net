@@ -11,6 +11,11 @@
 //   5. User "public-demo" + role 'public'
 //   6. Account "public-system" (type='system', owner=public-demo)
 //   7. ApiKey publique scopée projet 'default' (read-only, REST + MCP)
+//   8. Portal Account + Portal ApiKey (B1+B2 multi-tenant β)
+//
+// NB : les schémas business (Plan/Subscription/Invoice/UsageLog) et le seed
+// des plans par défaut sont une concern cloud (Octocloud), pas net (Octonet
+// générique). Voir @mostajs/cloud-config et l'instrumentation Octocloud.
 //
 // Author: Dr Hamid MADANI <drmdh@msn.com>
 

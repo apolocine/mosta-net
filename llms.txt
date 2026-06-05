@@ -1,7 +1,7 @@
 # @mostajs/net — fiche LLM
 > Serveur de transport multi-protocole pour @mostajs/orm : expose un schéma d'entités via REST, GraphQL, WebSocket, SSE, JSON-RPC, MCP (+ gRPC, tRPC, OData, Arrow Flight, NATS).
 
-- Version: 2.7.5 · Licence: AGPL-3.0-or-later · Auteur: Dr Hamid MADANI <drmdh@msn.com>
+- Version: 2.7.6 · Licence: AGPL-3.0-or-later · Auteur: Dr Hamid MADANI <drmdh@msn.com>
 - Chemin: mostajs/mosta-net · Statut audit: complet (dist/)
 - Nom de marque: « Octonet ». Repo: github.com/apolocine/mosta-net
 
@@ -79,6 +79,12 @@ CLI : `npx mostajs-net serve`  ·  MCP : binaire `octonet-mcp`.
 - cloudHook / transportFilter / projectMetrics sont des singletons à état mutable global, pas des classes à instancier.
 - Le `projectName` du TransportContext est le nom unique du projet, pas un ID numérique.
 - v2.7.5 marquée « unreleased » dans le CHANGELOG : chantier « system dialect séparé du singleton métier » — les consumers système utilisent getSystemDialect() (stable) et non le dialect métier mutable.
+- **Champs `type:"date"` sérialisés en `{}` côté HTTP — corrigé en 2.7.6** (présent dans toute version npm ≤ 2.7.5). Symptôme : `createdAt: {}`, `updatedAt: {}`, tout `timestamp` métier devenait un objet vide dans la réponse REST, alors que l'ORM hydrate bien une `Date` JS (`instanceof Date === true`). Cause racine : `sanitizer-middleware::stripFields()` rebuild un plain object via `Object.keys(value)` — `Object.keys(new Date()) === []`, donc la Date sortait à vide ; idem pour `RegExp`, `Buffer`, BSON `ObjectId`, `Map`, `Set`. Fix 2.7.6 : garde `isNonPlainObject(value)` qui renvoie la valeur inchangée, laissant Fastify appliquer `Date.toJSON() → ISO`. Diagnostic reproductible : `test-scripts/diagnose-date-serialization.mjs`.
+
+## TESTS / DIAGNOSTICS
+- `test-scripts/_test-server.mjs` : serveur @mostajs/net minimal (2 entités) pour smoke local.
+- `test-scripts/smoke-system-isolation.sh`, `test-scripts/test-replicator-*.sh` : scénarios d'intégration.
+- `test-scripts/diagnose-date-serialization.mjs` : compare la lecture d'un champ `type:"date"` via `EntityService.execute` (chemin ORM pur) **et** via fetch HTTP loopback du serveur — diagnostique si le bug Date→`{}` vient de l'ORM ou de la couche HTTP @mostajs/net. Réutilisable sur tout projet qui expose un `schemas.json` et un serveur @mostajs/net local.
 
 ## RÉFÉRENCES
 - README.md (présentation Octonet, 11 transports, onboarding 3 tiers, déploiement)

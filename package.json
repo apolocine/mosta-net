@@ -1,6 +1,6 @@
 {
   "name": "@mostajs/net",
-  "version": "2.7.5",
+  "version": "2.7.7",
   "description": "Multi-protocol transport layer for @mostajs/orm — expose entities via REST, gRPC, GraphQL, WebSocket, SSE, tRPC, MCP, OData, Arrow Flight, JSON-RPC, NATS",
   "author": "Dr Hamid MADANI <drmdh@msn.com>",
   "license": "AGPL-3.0-or-later",
@@ -50,7 +50,7 @@
     "test:cloud": "tsx test-scripts/test-cloud-extensions.ts"
   },
   "peerDependencies": {
-    "@mostajs/api-keys": "^0.1.2",
+    "@mostajs/api-keys": "^0.1.2 || ^0.2.0",
     "@mostajs/auth": ">=2.5.0",
     "@mostajs/cloud-middleware": "^0.2.3",
     "@mostajs/config": ">=0.1.0",
