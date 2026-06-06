@@ -1,5 +1,14 @@
 # Changelog — @mostajs/net
 
+## 2.7.8 (2026-06-06) — peerDependency `@mostajs/orm` élargie à `^1.13.1 || ^2.5.0`
+
+**Changé** : la peerDependency `@mostajs/orm` passe de `^1.13.1` à **`^1.13.1 || ^2.5.0`**, et net est
+désormais **buildé/testé contre `@mostajs/orm@2.5.3`** (dernière version). Cela permet aux consommateurs
+d'utiliser le dernier orm — qui **corrige les anomalies #17/#18** (`indexes: [{ fields: ['a','b'] }]`,
+forme tableau, générait un index sur la colonne `"0"` → `no such column: 0` → `initSchema` avorté, les
+tables suivantes jamais créées). net n'utilise que des APIs orm stables (`getDialect`, `initSchema`,
+`registerSchemas`, `EntityService`, `getAllSchemas`, `disconnectDialect`) → compatible 1.x **et** 2.x.
+
 ## 2.7.7 (2026-06-05) — peerDependency `@mostajs/api-keys` élargie à `^0.1.2 || ^0.2.0`
 
 **Changé** : la peerDependency `@mostajs/api-keys` passe de `^0.1.2` à **`^0.1.2 || ^0.2.0`**.
