@@ -1723,7 +1723,7 @@ ${C.cyan}└──────────────────────�
   });
 
   // 8g. Project namespace routing — /:project/* (externalized in src/routes/project.ts)
-  registerProjectRoutes(app, pm, protectedOrmHandler);
+  registerProjectRoutes(app, pm, protectedOrmHandler, { getSystemDialect: () => systemDialect });
 
   // 8g-bis. T1 — sandbox publique /try (POST=create, GET=HTML form, cleanup TTL 7j)
   // The trial User/Account/ApiKey rows live in the orm singleton (= meta DB).

@@ -3,9 +3,10 @@
 // Author: Dr Hamid MADANI drmdh@msn.com
 
 import type { FastifyInstance } from 'fastify';
-import type { EntitySchema, OrmRequest, OrmResponse } from '@mostajs/orm';
+import type { EntitySchema, OrmRequest, OrmResponse, IDialect } from '@mostajs/orm';
 import type { TransportContext } from '../core/types.js';
 import { McpTransport } from '../transports/mcp.transport.js';
+import { SSETransport } from '../transports/sse.transport.js';
 import { getEnv } from '@mostajs/config';
 
 /** Hash password — délégué à @mostajs/auth (bcryptjs avec fallback unifié). */
@@ -21,6 +22,14 @@ interface ProjectManager {
   updateProject(name: string, updates: any): Promise<void>;
   listProjects(): any[];
   hasProject(name: string): boolean;
+  /** Per-project EntityService (emits entity.* change events). */
+  resolveEntityService?(name: string): any;
+}
+
+/** Options for per-project realtime (SSE) wiring. */
+interface ProjectRoutesOptions {
+  /** Returns the system dialect used by authGuard to validate api-keys. */
+  getSystemDialect?: () => IDialect | null | undefined;
 }
 
 const RESERVED_NAMES = new Set([
@@ -32,7 +41,44 @@ export function registerProjectRoutes(
   app: FastifyInstance,
   pm: ProjectManager,
   ormHandler: OrmHandler,
+  options: ProjectRoutesOptions = {},
 ) {
+  const { getSystemDialect } = options;
+
+  // Per-project SSE transports (lazy). One SSETransport per project, subscribed
+  // once to that project's EntityService change events. Lets each project expose
+  // its own realtime feed at /:project/events with project-scoped api-keys —
+  // l'équivalent namespacé du /events du projet 'default'.
+  const projectSse = new Map<string, SSETransport>();
+
+  async function handleProjectSse(projectName: string, projectInfo: any, req: any, reply: any) {
+    // Auth : la clé doit être autorisée pour CE projet (scope projects=projectName),
+    // transport sse, opération read. defaultProject porte le slug du projet courant.
+    const { authGuard } = await import('../auth/route-guard.js');
+    const sys = getSystemDialect ? getSystemDialect() : null;
+    const auth = await authGuard(sys, req, { transport: 'sse', operation: 'read', defaultProject: projectName });
+    if (!auth.ok) { reply.code(auth.status!); return auth.body; }
+
+    let sse = projectSse.get(projectName);
+    if (!sse) {
+      sse = new SSETransport();
+      const schemas: EntitySchema[] = Array.isArray(projectInfo.schemas) ? projectInfo.schemas : [];
+      for (const s of schemas) sse.registerEntity(s);
+      // Abonnement unique à l'EntityService du projet (mêmes events que /events default).
+      const es = pm.resolveEntityService ? pm.resolveEntityService(projectName) : null;
+      if (es && typeof es.on === 'function') {
+        const sseRef = sse;
+        es.on('entity.created',  (d: any) => sseRef.broadcast('entity.created', d));
+        es.on('entity.updated',  (d: any) => sseRef.broadcast('entity.updated', d));
+        es.on('entity.deleted',  (d: any) => sseRef.broadcast('entity.deleted', d));
+        es.on('entity.upserted', (d: any) => sseRef.broadcast('entity.upserted', d));
+      }
+      projectSse.set(projectName, sse);
+    }
+
+    reply.hijack();
+    sse.addClient(reply.raw);
+  }
 
   // ── REST handler for a specific project ──
   async function handleProjectRest(projectName: string, collection: string, req: any, reply: any) {
@@ -417,6 +463,11 @@ export function registerProjectRoutes(
         if (msg.includes('already exists') || msg.includes('existe')) return { ok: true, message: 'Database already exists' };
         return { ok: false, error: msg };
       }
+    }
+
+    // ── SSE: /:project/events (realtime, project-scoped api-key) ──
+    if (subpath === '/events' || subpath.startsWith('/events')) {
+      return handleProjectSse(project, projectInfo, req, reply);
     }
 
     // ── REST: /:project/api/v1/:collection[/:id] ──

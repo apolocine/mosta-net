@@ -1,5 +1,29 @@
 # Changelog — @mostajs/net
 
+## 2.7.9 (2026-06-06) — SSE temps réel **par-projet** (`/:project/events`)
+
+**Ajouté** : le routage de namespace projet (`/:project/*`) expose désormais un flux **SSE**
+à `/:project/events`, équivalent namespacé du `/events` du projet `default`. Chaque projet
+obtient (lazy) son propre `SSETransport`, abonné **une seule fois** aux events de l'`EntityService`
+du projet (`pm.resolveEntityService(project)` → `entity.created|updated|deleted|upserted`).
+
+**Auth** : le endpoint est gardé par `authGuard(systemDialect, req, { transport: 'sse', operation: 'read',
+defaultProject: project })` → la clé doit être **autorisée pour CE projet** (scope `projects=<slug>`).
+Une clé scopée à une course (`projects:[<slug>]`) ouvre donc son flux temps réel sans pouvoir lire
+les autres — isolation réelle, sans dégradation (`openMode` non utilisé).
+
+**API** : `registerProjectRoutes(app, pm, ormHandler, { getSystemDialect })` — 4ᵉ argument optionnel
+(rétro-compatible) fournissant le dialecte système à l'authGuard SSE. Sans lui, le SSE par-projet
+reste inactif (les autres routes projet inchangées).
+
+**Motivation** : plateforme d'événements sportifs (`geo.amia.fr/<course>/`) — chaque course = un projet
+net, avec sa clé READ (spectateurs, SSE) et ses clés WRITE (cyclistes, REST). Avant ce correctif le
+temps réel n'existait que sur `default`, qui ignore `?project=` et rejette (403) les clés scopées course.
+
+> Limite connue : le **WS par-projet** et l'**auto-stamp `account`** sur les routes projet ne sont pas
+> couverts par cette version (le middleware account-scope n'auto-estampille qu'un set fixe d'entités
+> système). À traiter séparément.
+
 ## 2.7.8 (2026-06-06) — peerDependency `@mostajs/orm` élargie à `^1.13.1 || ^2.5.0`
 
 **Changé** : la peerDependency `@mostajs/orm` passe de `^1.13.1` à **`^1.13.1 || ^2.5.0`**, et net est
