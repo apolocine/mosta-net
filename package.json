@@ -1,6 +1,6 @@
 {
   "name": "@mostajs/net",
-  "version": "2.7.9",
+  "version": "2.7.10",
   "description": "Multi-protocol transport layer for @mostajs/orm — expose entities via REST, gRPC, GraphQL, WebSocket, SSE, tRPC, MCP, OData, Arrow Flight, JSON-RPC, NATS",
   "author": "Dr Hamid MADANI <drmdh@msn.com>",
   "license": "AGPL-3.0-or-later",
@@ -102,7 +102,7 @@
     "@mostajs/cloud-middleware": "^0.2.3",
     "@mostajs/config": "^1.0.0",
     "@mostajs/mproject": "file:../mosta-mproject",
-    "@mostajs/orm": "^2.5.3",
+    "@mostajs/orm": "^2.5.4",
     "@mostajs/project-life": "^0.1.2",
     "@mostajs/rbac": "^2.4.0",
     "@mostajs/replicator": "file:../mosta-replicator",

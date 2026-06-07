@@ -1,5 +1,14 @@
 # Changelog — @mostajs/net
 
+## 2.7.10 (2026-06-07) — rebuild contre `@mostajs/orm@2.5.4`
+
+**Changé** : devDependency `@mostajs/orm` portée à **`^2.5.4`** ; net est désormais
+**buildé/testé contre orm 2.5.4** (qui corrige l'anomalie #19 — `deserializeRow` sur
+schéma sans `relations` — et ajoute #20 — auto-`ALTER TABLE` au write). La
+peerDependency reste large (`^1.13.1 || ^2.5.0`) → compatible 1.x **et** 2.x. Aucun
+changement d'API net (APIs orm stables consommées). Bénéfice consommateur : les
+schémas publiés via net **sans bloc `relations`** ne plantent plus à la lecture.
+
 ## 2.7.9 (2026-06-06) — SSE temps réel **par-projet** (`/:project/events`)
 
 **Ajouté** : le routage de namespace projet (`/:project/*`) expose désormais un flux **SSE**
